@@ -45,6 +45,7 @@ Multiple B₁g channels contribute! Compute both:
 import numpy as np
 import matplotlib.pyplot as plt
 from scipy.linalg import eigh
+from scipy.signal import find_peaks
 from dataclasses import dataclass
 from typing import Tuple, Dict
 
@@ -56,28 +57,27 @@ from typing import Tuple, Dict
 class ModelParams:
     """Physical parameters in eV units"""
     # Microscopic parameters
-    t0: float = 0.5           # Bare hopping integral (eV)
-    U: float = 3.0            # Hubbard U (eV) - charge transfer regime
-    Delta_CF: float = 0.1     # Crystal field splitting Γ₆-Γ₇ (eV)
-    g_JT: float = 0.45        # Electron-phonon coupling (eV/Å)
-    K_lattice: float = 4.0    # Lattice spring constant (eV/Å²)
-    beta: float = 0.5         # Hopping-distortion coupling: t(Q) = t₀(1-βQ²)
-    eta: float = 0.1          # AFM asymmetry (Γ₇ feels η×M compared to Γ₆)
+    t0: float               # Bare hopping integral (eV)
+    U: float                # Hubbard U (eV) - charge transfer regime
+    Delta_CF: float         # Crystal field splitting Γ₆-Γ₇ (eV)
+    g_JT: float             # Electron-phonon coupling (eV/Å)
+    K_lattice: float        # Lattice spring constant (eV/Å²)
+    beta: float             # Hopping-distortion coupling: t(Q) = t₀(1-βQ²)
+    eta: float              # AFM asymmetry (Γ₇ feels η×M compared to Γ₆)
     
     # Cluster parameters
-    Z: int = 4                # Coordination number for 2D square lattice
+    Z: int                  # Coordination number for 2D square lattice
     
     # Simulation parameters
-    nk: int = 32              # k-points per direction (32×32 grid)
-    kT: float = 0.005         # Temperature (0.01 eV ~ 116 K)
-    a: float = 1.0            # Lattice constant (Å)
+    nk: int                 # k-points per direction (32×32 grid)
+    kT: float               # Temperature (0.01 eV ~ 116 K)
+    a: float                # Lattice constant (Å)
     
     # Convergence
-    max_iter: int = 150
-    tol: float = 1e-6
-    mixing: float = 0.2       # Slower mixing for stability in high-dim space
-    mu_adjust_rate: float = 0.07  # Chemical potential adjustment speed
-
+    max_iter: int
+    tol: float
+    mixing: float           # Slower mixing for stability in high-dim space
+    mu_adjust_rate: float   # Chemical potential adjustment speed
 
 # =========================================================================
 # 2. CLUSTER MEAN-FIELD SOLVER
@@ -263,7 +263,6 @@ class ClusterMF:
             ) / Z
         )
 
-
 # =============================================================================
 # 3. RENORMALIZED MEAN-FIELD THEORY (16x16 BdG) SOLVER WITH CLUSTER MF
 # =============================================================================
@@ -304,15 +303,17 @@ class RMFT_Solver:
         Physical interpretation:
         - g_t: Kinetic energy suppression (→0 at half-filling = Mott insulator)
         - g_J: Exchange enhancement (→4 at half-filling)
+        - Handles both hole doping (δ > 0) and electron doping (δ < 0)
         
         Returns:
             g_t: Kinetic renormalization factor
             g_J: Exchange renormalization factor
         """
-        delta = max(delta, 1e-6)  # Avoid singularity
+        abs_delta = abs(delta)
+        abs_delta = max(abs_delta, 1e-6)  # Avoid singularity
         
-        g_t = (2.0 * delta) / (1.0 + delta)
-        g_J = 4.0 / ((1.0 + delta) ** 2)
+        g_t = (2.0 * abs_delta) / (1.0 + abs_delta)
+        g_J = 4.0 / ((1.0 + abs_delta) ** 2)
         return g_t, g_J
     
     # =========================================================================
@@ -404,7 +405,7 @@ class RMFT_Solver:
     
     def build_single_particle_hamiltonian(self, sign_M: float, Q: float, mu: float) -> np.ndarray:
         """
-        Build single-particle Hamiltonian for cluster calculation (WITHOUT AFM term)
+        Build single-particle Hamiltonian for cluster calculation (WITHOUT AFM Zeeman term)
         
         Used as input to cluster exact diagonalization.
         AFM exchange appears at cluster level via O⊗O tensor product.
@@ -415,8 +416,6 @@ class RMFT_Solver:
         1. Chemical potential: -μ
         2. Crystal field: Δ_CF on Γ₇
         3. JT mixing: g_JT·Q·(τ_x ⊗ I_spin)
-        
-        Note: NO AFM Zeeman term - handled by cluster exchange
         """
         H = np.zeros((4, 4), dtype=complex)
         
@@ -431,7 +430,6 @@ class RMFT_Solver:
         h_jt = self.p.g_JT * Q
         H[0, 2] = H[2, 0] = h_jt  # 6↑ ↔ 7↑
         H[1, 3] = H[3, 1] = h_jt  # 6↓ ↔ 7↓
-        
         return H
     
     def build_pairing_block(self, Delta: complex) -> np.ndarray:
@@ -450,7 +448,6 @@ class RMFT_Solver:
         # Singlet pairing: 6↑-7↓ with opposite sign for 6↓-7↑
         D[0, 3] = Delta    # 6↑ pairs with 7↓
         D[1, 2] = -Delta   # 6↓ pairs with 7↑ (opposite sign for antisymmetry)
-        
         return D
     
     def build_bdg_matrix(self, k: np.ndarray, M: float, Q: float, 
@@ -527,68 +524,45 @@ class RMFT_Solver:
         # Hermitian conjugate
         BdG[8:12, 0:4] = np.conj(D_matrix).T
         BdG[12:16, 4:8] = np.conj(D_matrix).T
-        
         return BdG
     
     # =========================================================================
     # 3.4 OBSERVABLES FROM BdG SPECTRUM (PRIMARY SOURCE)
     # =========================================================================
     
-    def calculate_observables_from_BdG(self, M: float, Q: float, Delta: complex, 
-                                       mu: float, t_eff: float, J_eff: float) -> Tuple[float, float]:
+    def _compute_site_magnetization_and_quadrupole(self, vec: np.ndarray, u_slice: slice, v_slice: slice,
+                                                    f: float, f_bar: float) -> Tuple[float, float]:
         """
-        Calculates M and Q values from the FULL lattice solution (BdG) to see how Delta (SC) distorts the orbitals.
+        Helper function: compute magnetization and quadrupole for a single site.
         
-        - ⟨τ_x⟩: expectation value of quadrupole operator (orbital mixing)
-        - Q: physical lattice deformation, which comes from the condition ∂F/∂Q = 0
-        - Relation: Q = -(g_JT/K)·⟨τ_x⟩
+        Extracts particle (u) and hole (v) contributions from BdG eigenvector.
+        Uses orbital-dependent spin operator: sz = [+1, -1, +η, -η] in [6↑, 6↓, 7↑, 7↓] basis.
         
-        Structure of BdG vectors (16 components):
-        [u_A_6_up, u_A_6_dn, u_A_7_up, u_A_7_dn, u_B_6_up, u_B_6_dn, u_B_7_up, u_B_7_dn,
-         v_A_6_up, v_A_6_dn, v_A_7_up, v_A_7_dn, v_B_6_up, v_B_6_dn, v_B_7_up, v_B_7_dn]
+        Parameters:
+            vec: 16-component BdG eigenvector
+            u_slice: slice for particle amplitudes
+            v_slice: slice for hole amplitudes
+            f: Fermi function f(E)
+            f_bar: 1 - f(E)
         
         Returns:
-            (M_lattice, tau_x_expectation): Magnetization and quadrupole operator ⟨τ_x⟩ from BdG
+            (m, tau): magnetization and quadrupole contributions
         """
-        total_M = 0.0
-        total_tau_x = 0.0
-        
         # Sz operator in orbital basis (6↑, 6↓, 7↑, 7↓)
         sz_op = np.array([1.0, -1.0, self.p.eta, -self.p.eta])
-
-        def site_contrib(vec, u_slice, v_slice, f, f_bar):
-            # Extract particle (u) and hole (v) parts
-            u = vec[u_slice]
-            v = vec[v_slice]
-
-            # Magnetization contribution
-            m = (np.abs(u)**2 @ sz_op) * f + (np.abs(v)**2 @ sz_op) * f_bar
-
-            # Quadrupole τ_x mixing between orbitals 6 and 7
-            tau_u = 2.0 * np.real(np.vdot(u[[0, 1]], u[[2, 3]]))
-            tau_v = 2.0 * np.real(np.vdot(v[[0, 1]], v[[2, 3]]))
-            tau = tau_u * f + tau_v * f_bar
-
-            return m, tau
-
-        for kvec in self.k_points:
-            H = self.build_bdg_matrix(kvec, M, Q, Delta, mu, t_eff, J_eff)
-            eigvals, eigvecs = eigh(H)
-            f = self.fermi_function(eigvals)
-            f_bar = 1.0 - f
-
-            for n in range(16):
-                vec = eigvecs[:, n]
-                # Site A
-                mA, tauA = site_contrib(vec, slice(0, 4), slice(8, 12), f[n], f_bar[n])
-                # Site B
-                mB, tauB = site_contrib(vec, slice(4, 8), slice(12, 16), f[n], f_bar[n])
-                # Staggered M, uniform τ_x
-                total_M     += 0.5 * (mA - mB)
-                total_tau_x += 0.5 * (tauA + tauB)
-
-        norm = 1.0 / self.N_k
-        return total_M * norm, total_tau_x * norm
+        
+        # Extract particle (u) and hole (v) parts
+        u = vec[u_slice]
+        v = vec[v_slice]
+        
+        # Magnetization contribution
+        m = (np.abs(u)**2 @ sz_op) * f + (np.abs(v)**2 @ sz_op) * f_bar
+        
+        # Quadrupole τ_x mixing between orbitals 6 and 7
+        tau_u = 2.0 * np.real(np.vdot(u[[0, 1]], u[[2, 3]]))
+        tau_v = 2.0 * np.real(np.vdot(v[[0, 1]], v[[2, 3]]))
+        tau = tau_u * f + tau_v * f_bar
+        return m, tau
     
     def compute_observables_from_bdg(self, eigvals: np.ndarray, eigvecs: np.ndarray) -> Dict:
         """
@@ -646,49 +620,20 @@ class RMFT_Solver:
             
             # --- 1. PARTICLE DENSITY (CORRECTED) ---
             # ⟨c†c⟩ = Σ_n [|u_n|² f(E_n) + |v_n|² (1-f(E_n))]
-            u2_A = np.sum(np.abs(u_A)**2)
-            v2_A = np.sum(np.abs(v_A)**2)
-            u2_B = np.sum(np.abs(u_B)**2)
-            v2_B = np.sum(np.abs(v_B)**2)
+            dens_A += np.sum(np.abs(u_A)**2) * fn + np.sum(np.abs(v_A)**2) * fn_bar
+            dens_B += np.sum(np.abs(u_B)**2) * fn + np.sum(np.abs(v_B)**2) * fn_bar
             
-            dens_A += u2_A * fn + v2_A * fn_bar
-            dens_B += u2_B * fn + v2_B * fn_bar
+            # --- 2. MAGNETIZATION & QUADRUPOLE ---
+            # Use class-level helper for clean code
+            mA, tauA = self._compute_site_magnetization_and_quadrupole(psi, slice(0, 4), slice(8, 12), fn, fn_bar)
+            mB, tauB = self._compute_site_magnetization_and_quadrupole(psi, slice(4, 8), slice(12, 16), fn, fn_bar)
             
-            # --- 2. MAGNETIZATION (CORRECTED) ---
-            # ⟨S_z⟩ weighted by orbital character
-            # Operator in [6↑, 6↓, 7↑, 7↓] basis: diag[+1, -1, +η, -η]
-            sz_operator = np.array([1.0, -1.0, self.p.eta, -self.p.eta])
+            mag_A += mA
+            mag_B += mB
+            quad_A += tauA
+            quad_B += tauB
             
-            # Particle contribution
-            mag_u_A = np.sum(np.abs(u_A)**2 * sz_operator)
-            mag_u_B = np.sum(np.abs(u_B)**2 * sz_operator)
-            
-            # Hole contribution (same operator, different thermal weight)
-            mag_v_A = np.sum(np.abs(v_A)**2 * sz_operator)
-            mag_v_B = np.sum(np.abs(v_B)**2 * sz_operator)
-            
-            mag_A += mag_u_A * fn + mag_v_A * fn_bar
-            mag_B += mag_u_B * fn + mag_v_B * fn_bar
-            
-            # --- 3. QUADRUPOLE MOMENT (CORRECTED) ---
-            # ⟨τ_x⟩ = ⟨|6⟩⟨7| + |7⟩⟨6|⟩ (orbital mixing)
-            def get_quadrupole(amp):
-                """Calculate ⟨τ_x⟩ from amplitudes (u or v)"""
-                # indices: 0=6↑, 1=6↓, 2=7↑, 3=7↓
-                return 2.0 * np.real(np.conj(amp[0])*amp[2] + np.conj(amp[1])*amp[3])
-            
-            quad_u_A = get_quadrupole(u_A)
-            quad_v_A = get_quadrupole(v_A)
-            quad_u_B = get_quadrupole(u_B)
-            quad_v_B = get_quadrupole(v_B)
-            
-            quad_A += quad_u_A * fn + quad_v_A * fn_bar
-            quad_B += quad_u_B * fn + quad_v_B * fn_bar
-            
-            # --- 4. PAIRING AMPLITUDE (CORRECTED) ---
-            # ⟨c_i c_j⟩ = Σ_n u_i v_j* (1 - 2f(E_n))
-            # The (1-2f) factor is CRITICAL for proper SC physics
-            
+            # --- 3. PAIRING AMPLITUDE ---
             # Sublattice A contribution
             pair_A = (u_A[0] * np.conj(v_A[3]) -  # 6↑-7↓
                      u_A[1] * np.conj(v_A[2]))    # 6↓-7↑
@@ -697,6 +642,7 @@ class RMFT_Solver:
             pair_B = (u_B[0] * np.conj(v_B[3]) -  # 6↑-7↓
                      u_B[1] * np.conj(v_B[2]))    # 6↓-7↑
             
+            # The (1-2f) factor is CRITICAL for proper SC physics: ⟨c_i c_j⟩ = Σ_n u_i v_j* (1 - 2f(E_n))
             pair_sum += (pair_A + pair_B) * fn_pair
         
         # --- NORMALIZE TO PHYSICAL OBSERVABLES ---
@@ -704,8 +650,8 @@ class RMFT_Solver:
         # Average density per site (average of both sublattices)
         n_avg = (dens_A + dens_B) / 2.0
         
-        # Staggered magnetization: |M_A - M_B| / 2
-        M_staggered = abs(mag_A - mag_B) / 2.0
+        # Staggered magnetization: (M_A - M_B) / 2
+        M_staggered = (mag_A - mag_B) / 2.0
         
         # Uniform quadrupole: (Q_A + Q_B) / 2
         Q_uniform = (quad_A + quad_B) / 2.0
@@ -727,16 +673,18 @@ class RMFT_Solver:
     def compute_bdg_free_energy(self, M: float, Q: float, Delta: complex, 
                                 mu: float, t_eff: float, J_eff: float) -> float:
         """
-        Compute grand potential from k-space BdG spectrum
-        
-        Ω_BdG = Σ_k,n [E_n(k) f(E_n) - T S(f_n)] + (K/2) Q²
-        
-        where S(f) = -f log(f) - (1-f) log(1-f) is entropy
-        
-        This is the thermodynamically correct free energy including:
-        - Electronic energy from BdG spectrum
+        Compute the total grand potential from the k-space BdG spectrum.
+
+        Ω_BdG = Σ_k,n [E_n(k) f(E_n) - T S(f_n)] + (K/2) Q²,
+
+        where S(f) = -f log f - (1 - f) log(1 - f).
+
+        Includes:
+        - Quasiparticle energy from the BdG spectrum (kinetic + interaction)
         - Thermal entropy
         - Elastic energy from lattice distortion
+
+        M contains the cluster correction via quantum fluctuations.
         """
         Omega = 0.0
         
@@ -760,7 +708,6 @@ class RMFT_Solver:
         
         # Add elastic energy: (K/2) Q²
         Omega += 0.5 * self.p.K_lattice * Q**2
-        
         return Omega
     
     def compute_cluster_free_energy(self, M: float, Q: float, mu: float, J_eff: float) -> Dict:
@@ -772,16 +719,12 @@ class RMFT_Solver:
         At T=0: F = E_0 (ground state energy)
         At T>0: Includes quantum and thermal fluctuations
         
-        CRITICAL: This captures quantum AFM fluctuations that mean-field BdG misses!
-        
-        IMPORTANT about quadrupole:
-        τ_x does NOT commute with H_cluster, so ⟨τ_x⟩² ≠ ⟨τ_x²⟩
-        We compute both to capture all B₁g channels and quantum fluctuations!
-        
+        IMPORTANT: This captures quantum AFM fluctuations that mean-field BdG misses!
+
         Returns:
             Dictionary with:
-            - 'F': Free energy
-            - 'M': Staggered magnetization from cluster
+            - 'F': Free energy PER SITE
+            - 'M': Staggered magnetization from cluster which contribute the final magnetization
             - 'Q_exp': Quadrupole expectation value ⟨τ_x⟩
             - 'Q_rms': RMS quadrupole √⟨τ_x²⟩ (includes fluctuations)
             - 'Q_fluctuation': Fluctuation strength
@@ -796,15 +739,19 @@ class RMFT_Solver:
         # Diagonalize
         E_cluster = np.linalg.eigvalsh(H_cluster)
         
-        # Compute free energy
+        # Compute free energy (TOTAL for cluster)
         if self.p.kT < 1e-8:
             # T=0: Free energy = ground state energy
-            F = E_cluster[0]
+            F_total = E_cluster[0]
         else:
             # T>0: F = -T log Z
             E_shifted = E_cluster - E_cluster[0]  # Shift to avoid overflow
             Z = np.sum(np.exp(-E_shifted / self.p.kT))
-            F = E_cluster[0] - self.p.kT * np.log(Z)
+            F_total = E_cluster[0] - self.p.kT * np.log(Z)
+        
+        # Normalize to PER-SITE energy: cluster has 2 sites, BdG is per-site, so we must divide by 2
+        CLUSTER_SIZE = 2
+        F_per_site = F_total / CLUSTER_SIZE
         
         # ===== COMPUTE OBSERVABLES FROM CLUSTER =====
         
@@ -816,7 +763,7 @@ class RMFT_Solver:
         M_B = self.cluster_mf.cluster_expectation(H_cluster, np.kron(I4, O_mag), self.p.kT)
         M_cluster = abs(M_A - M_B) / 2.0
         
-        # Quadrupole operator: τ_x
+        # Quadrupole operator, τ_x does NOT commute with H_cluster, so ⟨τ_x⟩² ≠ ⟨τ_x²⟩
         tau_x = np.zeros((4, 4), dtype=complex)
         tau_x[0, 2] = tau_x[2, 0] = 1.0  # 6↑ ↔ 7↑
         tau_x[1, 3] = tau_x[3, 1] = 1.0  # 6↓ ↔ 7↓
@@ -840,49 +787,24 @@ class RMFT_Solver:
         fluctuation = np.sqrt((sigma2_A + sigma2_B) / 2.0)
         
         return {
-            'F': F,
+            'F': F_per_site,
             'M': M_cluster,
             'Q_exp': Q_exp,
             'Q_rms': Q_rms,
             'Q_fluctuation': fluctuation
         }
-    
-    def total_free_energy(self, M: float, Q: float, Delta: complex, mu: float, 
-                         t_eff: float, J_eff: float, lambda_cluster: float = 1.0) -> float:
-        """
-        Total free energy combining BdG and cluster contributions
-        
-        F_total = F_BdG + λ_cluster × F_cluster
-        
-        Physical interpretation:
-        - F_BdG: Mean-field energy from delocalized quasiparticles
-        - F_cluster: Quantum correction from local AFM correlations
-        - λ_cluster: Weight parameter (~1 for balanced treatment)
-        
-        The optimal M, Q are found by minimizing F_total.
-        This is thermodynamically rigorous (no ad hoc mixing)!
-        """
-        F_bdg = self.compute_bdg_free_energy(M, Q, Delta, mu, t_eff, J_eff)
-        cluster_result = self.compute_cluster_free_energy(M, Q, mu, J_eff)
-        F_cluster = cluster_result['F']
-        
-        return F_bdg + lambda_cluster * F_cluster
-
 
 # =========================================================================
 # 4. SELF-CONSISTENT FIELD SOLVER
 # =========================================================================
-    
-    def solve_self_consistent(self, target_density: float,
-                             initial_M: float = 0.5,
-                             initial_Q: float = 0.0,
-                             initial_Delta: float = 0.05,
-                             lambda_cluster: float = 1.0,
-                             verbose: bool = True) -> Dict:
-        """
-        Self-consistent solution via FREE ENERGY MINIMIZATION
 
-        F_total(M, Q, Δ, μ) = F_BdG(M, Q, Δ, μ) + λ_cluster × F_cluster(M, Q, μ)
+    def solve_self_consistent(self, target_density: float,
+                            initial_M: float = 0.5,
+                            initial_Q: float = 0.0,
+                            initial_Delta: float = 0.05,
+                            verbose: bool = True) -> Dict:
+        """
+        Self-consistent solution via FREE ENERGY MINIMIZATION: F_total(M, Q, Δ, μ) = F_BdG(M, Q, Δ, μ)
         
         This is thermodynamically rigorous and ensures:
         ✓ Energy minimum (not arbitrary mixing)
@@ -900,163 +822,127 @@ class RMFT_Solver:
             initial_M: Starting guess for magnetization
             initial_Q: Starting guess for distortion
             initial_Delta: Starting guess for gap
-            lambda_cluster: Cluster correction weight (~1.0 for balanced)
             verbose: Print iteration details
         
         Returns:
             Dictionary with converged values and history
         """
-        # Initialize order parameters
         M = initial_M
         Q = initial_Q
         Delta = initial_Delta + 0.0j
         mu = 0.0
-        
-        # Compute doping
+
+        mu_low = mu - 2.0
+        mu_high = mu + 2.0
+        n_low = None
+        n_high = None
+
         doping = 1.0 - target_density
-        
-        # Storage for convergence history
+
         history = {
             'M': [], 'Q': [], 'Delta': [], 'density': [],
-            'F_total': [], 'F_bdg': [], 'F_cluster': [],
+            'F_total': [], 'F_cluster': [],
             'g_t': [], 'g_J': [], 'mu': []
         }
-        
+
         if verbose:
             print(f"\n{'='*80}")
-            print(f"BdG LATTICE-BASED SELF-CONSISTENT CALCULATION")
+            print("BdG LATTICE-BASED SELF-CONSISTENT CALCULATION")
             print(f"{'='*80}")
             print(f"Target density: {target_density:.3f} (doping δ={doping:.3f})")
-            print(f"Cluster weight: λ_cluster={lambda_cluster:.2f}")
-            print(f"Method: M, Q extracted from BdG eigenstates (SC → JT feedback)")
             print(f"{'-'*80}")
-        
-        # Main iteration loop
+
         for iteration in range(self.p.max_iter):
-            # Update effective parameters
+
+            # --- Renormalized parameters ---
             g_t, g_J = self.get_gutzwiller_factors(doping)
             t_eff = g_t * self.effective_hopping(Q)
             J_eff = self.effective_superexchange(Q, g_J)
-            
-            # ===== STEP 1: EXTRACT M, Q FROM BdG LATTICE SOLUTION =====
-            # The BdG eigenstates "know" superconductivity and contain Γ6−Γ7 mixing.
-            
-            M_lattice, tau_x_expectation = self.calculate_observables_from_BdG(
-                M, Q, Delta, mu, t_eff, J_eff
-            )
-            
-            # We calculate Q against the spring force: Q = - (g_JT / K) * <O_quad>
-            # Q_lattice is <O_quad>, so the distortion that the BdG shows
-            Q_target = -(self.p.g_JT / self.p.K_lattice) * tau_x_expectation
-            
-            # Self-consistent update (mixing with the old for stability)
-            M_new = M_lattice
-            Q_new = abs(Q_target)  # Physical distortion is always positive
-            
-            # Update t_eff, J_eff with new Q
-            t_eff_new = g_t * self.effective_hopping(Q_new)
-            J_eff_new = self.effective_superexchange(Q_new, g_J)
-            
-            # Compute free energy for diagnostics
-            F_optimal = self.total_free_energy(M_new, Q_new, Delta, mu, 
-                                              t_eff_new, J_eff_new, lambda_cluster)
-            
-            # ===== STEP 2: COMPUTE DELTA FROM GAP EQUATION =====
-            # For optimal M, Q, compute Delta from BdG pairing
-            
-            pairing_sum = 0.0
-            density_sum = 0.0
-            
-            for kvec in self.k_points:
-                H_BdG = self.build_bdg_matrix(kvec, M_new, Q_new, Delta, mu, 
-                                              t_eff_new, J_eff_new)
-                energies, eigvecs = eigh(H_BdG)
-                
-                obs = self.compute_observables_from_bdg(energies, eigvecs)
-                pairing_sum += obs['Pair']
-                density_sum += obs['n']
-            
-            n_kspace = density_sum / self.N_k
-            Pair_kspace = pairing_sum / self.N_k
-            
-            # Gap equation: Δ = V_eff × ⟨pairing⟩
+
+            # --- k-space observables ---
+            obs = self._compute_k_observables(M, Q, Delta, mu, t_eff, J_eff)
+            M_lattice = obs['M']
+            tau_x = obs['Q']
+            n_kspace = obs['n']
+            Pair_kspace = obs['Pair']
+
+            # --- Cluster correction ---
+            cluster = self.compute_cluster_free_energy(M, Q, mu, J_eff)
+            M_cluster = cluster['M']
+
+            M_new = 0.7 * M_lattice + 0.3 * M_cluster
+            Q_new = -(self.p.g_JT / self.p.K_lattice) * tau_x
+
+            # --- Gap equation ---
             V_eff = self.p.g_JT**2 / self.p.K_lattice
             Delta_new = abs(V_eff * Pair_kspace)
-            
-            # ===== STEP 3: ADJUST CHEMICAL POTENTIAL =====
-            density_error = n_kspace - target_density
-            mu -= self.p.mu_adjust_rate * density_error
-            
-            # Update doping
-            doping = abs(1.0 - n_kspace)
-            
-            # ===== STEP 4: MIXING FOR STABILITY =====
-            M_mixed = (1 - self.p.mixing) * M + self.p.mixing * M_new
-            Q_mixed = (1 - self.p.mixing) * Q + self.p.mixing * Q_new
-            Delta_mixed = (1 - self.p.mixing) * Delta + self.p.mixing * Delta_new
-            
-            # ===== STEP 5: CONVERGENCE CHECK =====
-            diff_M = abs(M_mixed - M)
-            diff_Q = abs(Q_mixed - Q)
-            diff_Delta = abs(Delta_mixed - Delta)
-            max_diff = max(diff_M, diff_Q, diff_Delta)
-            
-            # Compute free energy components for diagnostics
-            F_bdg = self.compute_bdg_free_energy(M_new, Q_new, Delta, mu, t_eff_new, J_eff_new)
-            cluster_result = self.compute_cluster_free_energy(M_new, Q_new, mu, J_eff_new)
-            F_cluster = cluster_result['F']
-            
-            # Record history
+
+            # --- Free energy ---
+            t_eff_new = g_t * self.effective_hopping(Q_new)
+            J_eff_new = self.effective_superexchange(Q_new, g_J)
+            F_total = self.compute_bdg_free_energy(
+                M_new, Q_new, Delta, mu, t_eff_new, J_eff_new
+            )
+
+            # --- Chemical potential update ---
+            mu, mu_low, mu_high, n_low, n_high = self._update_mu(
+                mu, n_kspace, target_density,
+                mu_low, mu_high, n_low, n_high
+            )
+
+            doping = 1.0 - n_kspace
+
+            # --- Mixing ---
+            M_mixed = self._mix(M, M_new)
+            Q_mixed = self._mix(Q, Q_new)
+            Delta_mixed = self._mix(Delta, Delta_new)
+
+            max_diff = max(
+                abs(M_mixed - M),
+                abs(Q_mixed - Q),
+                abs(Delta_mixed - Delta)
+            )
+
             history['M'].append(abs(M))
             history['Q'].append(abs(Q))
             history['Delta'].append(abs(Delta))
             history['density'].append(n_kspace)
-            history['F_total'].append(F_optimal)
-            history['F_bdg'].append(F_bdg)
-            history['F_cluster'].append(F_cluster)
+            history['F_total'].append(F_total)
+            history['F_cluster'].append(cluster['F'])
             history['g_t'].append(g_t)
             history['g_J'].append(g_J)
             history['mu'].append(mu)
-            
+
             if verbose and (iteration % 10 == 0 or iteration < 5):
                 print(f"Iter {iteration:3d}: "
-                      f"M={M:.4f}  Q={Q:.5f}  Δ={abs(Delta):.5f}  "
-                      f"n={n_kspace:.4f}  F={F_optimal:.6f}  "
-                      f"Q_fluct={cluster_result['Q_fluctuation']:.5f}")
-            
-            # Update
-            M = M_mixed
-            Q = Q_mixed
-            Delta = Delta_mixed
-            
-            # Check convergence
-            if max_diff < self.p.tol and abs(density_error) < 0.01:
-                # Final cluster diagnostics
+                    f"M={M:.4f}  Q={Q:.5f}  Δ={abs(Delta):.5f}  "
+                    f"n={n_kspace:.4f}  F={F_total:.6f}")
+
+            M, Q, Delta = M_mixed, Q_mixed, Delta_mixed
+
+            if max_diff < self.p.tol and abs(n_kspace - target_density) < 0.01:
+
                 final_cluster = self.compute_cluster_free_energy(M, Q, mu, J_eff_new)
-                
+
                 if verbose:
                     print(f"\n{'='*80}")
-                    print(f"✓ CONVERGED after {iteration+1} iterations!")
+                    print(f"✓ CONVERGED after {iteration+1} iterations")
                     print(f"{'='*80}")
-                    print(f"Final values:")
-                    print(f"  Magnetization:    M = {M:.6f}")
-                    print(f"  JT Distortion:    Q = {Q:.6f} Å")
-                    print(f"    (Q_exp={final_cluster['Q_exp']:.6f}, "
-                          f"Q_rms={final_cluster['Q_rms']:.6f}, "
-                          f"σ_Q={final_cluster['Q_fluctuation']:.6f})")
-                    print(f"  SC Gap:          |Δ| = {abs(Delta):.6f} eV")
-                    print(f"  Density:          n = {n_kspace:.6f}")
-                    print(f"  Chem. Potential:  μ = {mu:.6f} eV")
-                    print(f"  Free Energy:      F = {F_optimal:.6f} eV")
-                    print(f"    (BdG: {F_bdg:.6f}, Cluster: {F_cluster:.6f})")
-                    print(f"  Renormalization: g_t = {g_t:.4f}, g_J = {g_J:.4f}")
+                    print(f"M = {M:.6f}")
+                    print(f"Q = {Q:.6f} Å")
+                    print(f"|Δ| = {abs(Delta):.6f} eV")
+                    print(f"n = {n_kspace:.6f}")
+                    print(f"μ = {mu:.6f} eV")
+                    print(f"F = {F_total:.6f} eV")
+                    print(f"g_t = {g_t:.4f}, g_J = {g_J:.4f}")
                     print(f"{'='*80}\n")
+
                 break
+
         else:
             if verbose:
-                print(f"\n⚠ Warning: Did not converge after {self.p.max_iter} iterations")
-                print(f"Final error: {max_diff:.2e}\n")
-        
+                print(f"\n⚠ Warning: Did not converge after {self.p.max_iter} iterations\n")
+
         return {
             'M': M,
             'Q': Q,
@@ -1066,19 +952,69 @@ class RMFT_Solver:
             'g_t': g_t,
             'g_J': g_J,
             'J_eff': J_eff_new,
-            'F_total': F_optimal,
-            'F_bdg': F_bdg,
-            'F_cluster': F_cluster,
+            't_eff': t_eff_new,
+            'F_total': F_total,
             'converged': max_diff < self.p.tol,
             'history': history,
             'doping': doping
         }
+
+    def _compute_k_observables(self, M, Q, Delta, mu, t_eff, J_eff):
+
+        totals = dict(M=0.0, Q=0.0, n=0.0, Pair=0.0)
+
+        for kvec in self.k_points:
+            H = self.build_bdg_matrix(kvec, M, Q, Delta, mu, t_eff, J_eff)
+            eigvals, eigvecs = eigh(H)
+            obs = self.compute_observables_from_bdg(eigvals, eigvecs)
+
+            for key in totals:
+                totals[key] += obs[key]
+
+        return {k: v / self.N_k for k, v in totals.items()}
+
+    def _update_mu(self, mu, n_kspace, target_density,
+                mu_low, mu_high, n_low, n_high):
+
+        density_error = n_kspace - target_density
+
+        if density_error > 0:
+            mu_high, n_high = mu, n_kspace
+        else:
+            mu_low, n_low = mu, n_kspace
+
+        if n_low is not None and n_high is not None:
+            dmu = mu_high - mu_low
+            dn = n_high - n_low
+
+            if abs(dmu) > 1e-8 and abs(dn) > 1e-8:
+                dn_dmu = dn / dmu
+                if abs(dn_dmu) > 1e-6:
+                    mu_trial = mu - density_error / dn_dmu
+                    if mu_low < mu_trial < mu_high:
+                        return mu_trial, mu_low, mu_high, n_low, n_high
+
+            return 0.5 * (mu_low + mu_high), mu_low, mu_high, n_low, n_high
+
+        mu_new = mu - self.p.mu_adjust_rate * density_error
+        mu_new = np.clip(mu_new, mu_low, mu_high)
+        return mu_new, mu_low, mu_high, n_low, n_high
+
+    def _mix(self, old, new):
+        α = self.p.mixing
+        return (1 - α) * old + α * new
+
 # =============================================================================
 # 5. VISUALIZATION FUNCTIONS
 # =============================================================================
 
-def plot_convergence(results: Dict, title: str = "Convergence History") -> plt.Figure:
-    """Plot convergence history of order parameters and free energy"""
+def plot_convergence(results: Dict, title: str = "Self-Consistency Convergence at Fixed Doping") -> plt.Figure:
+    """
+    Plot convergence history for a SINGLE doping point
+    
+    Args:
+        results: Dictionary from solve_self_consistent() containing 'history' key
+    """
     history = results['history']
     
     fig, axes = plt.subplots(2, 3, figsize=(18, 10))
@@ -1107,16 +1043,15 @@ def plot_convergence(results: Dict, title: str = "Convergence History") -> plt.F
     ax.grid(True, alpha=0.3)
     ax.set_title('Superconducting Gap')
     
-    # Free Energy Components
+    # Free Energy Components - MAY BE NON-MONOTONIC
     ax = axes[1, 0]
     ax.plot(history['F_total'], 'k-', linewidth=2, label='F_total')
-    ax.plot(history['F_bdg'], 'b--', linewidth=1.5, alpha=0.7, label='F_BdG')
     ax.plot(history['F_cluster'], 'r--', linewidth=1.5, alpha=0.7, label='F_cluster')
     ax.set_ylabel('Free Energy (eV)', fontsize=12)
     ax.set_xlabel('Iteration', fontsize=12)
     ax.legend(fontsize=10)
     ax.grid(True, alpha=0.3)
-    ax.set_title('Free Energy Minimization')
+    ax.set_title('Free Energy During Iteration (May Be Non-Monotonic)')
     
     # Renormalization factors
     ax = axes[1, 1]
@@ -1128,75 +1063,237 @@ def plot_convergence(results: Dict, title: str = "Convergence History") -> plt.F
     ax.grid(True, alpha=0.3)
     ax.set_title('Gutzwiller Factors')
     
-    # Density
+    # Density - NUMERICAL CONVERGENCE, NOT PHYSICS
     ax = axes[1, 2]
     ax.plot(history['density'], 'orange', linewidth=2)
     ax.set_ylabel('Density n', fontsize=12)
     ax.set_xlabel('Iteration', fontsize=12)
     ax.grid(True, alpha=0.3)
-    ax.set_title('Electron Density')
+    ax.set_title('Electron Density (Constraint Convergence)')
     
     fig.suptitle(title, fontsize=14, fontweight='bold')
     plt.tight_layout()
     return fig
 
-def plot_phase_diagram(solver: RMFT_Solver, doping_range: np.ndarray):
+def plot_phase_diagrams(solver: RMFT_Solver, doping_range: np.ndarray,
+                        cf_min: float = 0.05, cf_max: float = 0.20, N_cf: int = 10):
     """
-    Scan doping to create phase diagram
-    
-    Expected behavior with correct SC → JT feedback:
-    - Smoother AFM collapse due to quantum fluctuations
-    - Enhanced JT distortion from SC-induced Γ₆–Γ₇ mixing
-    - δ ≈ 0.05-0.15: M reduced, Q ≠ 0, Δ ≠ 0 (SC+JT coexistence)
+    Scan doping to create phase diagram using WARM-START
+    Scans through the crystal field (Delta_CF) to find the 'Sweet Spot' where TC (Delta_sc) is largest.
+    Implements warm-start: each point starts from previous converged solution
+    Validates density constraint at each point
     """
-    M_values = []
-    Q_values = []
-    Delta_values = []
+    # Phase data storage
+    phase_data = {
+        'doping': [], 'M': [], 'Q': [], 'Delta': [],
+        'mu': [], 'density': [], 'F_total': []
+    }
     
     print(f"\n{'='*70}")
-    print("Scanning phase diagram over doping range")
+    print("Scanning phase diagram over doping range (with WARM-START)")
     print(f"{'='*70}\n")
+    
+    # Warm-start initialization
+    previous_solution = {'M': 0.5, 'Q': 0.0, 'Delta': 0.05}
     
     for i, doping in enumerate(doping_range):
         density = 1.0 - doping
         print(f"\n[{i+1}/{len(doping_range)}] Solving for δ = {doping:.3f}")
         
+        # Solve with warm-start from previous solution
         result = solver.solve_self_consistent(
             target_density=density,
-            initial_M=0.5,
-            initial_Q=0.0,
-            initial_Delta=0.05,
-            lambda_cluster=1.0,
+            initial_M=previous_solution['M'],
+            initial_Q=previous_solution['Q'],
+            initial_Delta=previous_solution['Delta'],
             verbose=False
         )
         
-        M_values.append(result['M'])
-        Q_values.append(result['Q'])
-        Delta_values.append(result['Delta'])
+        # Validate density constraint
+        density_error = abs(result['density'] - density)
+        if density_error > 0.01:
+            print(f"    ⚠ WARNING: Density constraint not satisfied (error={density_error:.4f})")
+        
+        # Store CONVERGED solution in phase_data
+        phase_data['doping'].append(doping)
+        phase_data['M'].append(result['M'])
+        phase_data['Q'].append(result['Q'])
+        phase_data['Delta'].append(result['Delta'])
+        phase_data['mu'].append(result['mu'])
+        phase_data['density'].append(result['density'])
+        phase_data['F_total'].append(result['F_total'])
         
         print(f"    → M={result['M']:.3f}, Q={result['Q']:.4f}, Δ={result['Delta']:.4f}")
+        
+        # Update warm-start for next point
+        previous_solution = {'M': result['M'], 'Q': result['Q'], 'Delta': result['Delta']}
     
-    # Plot phase diagram
-    fig, ax = plt.subplots(1, 1, figsize=(10, 6))
+    # Create 2x2 figure
+    fig, axes = plt.subplots(2, 2, figsize=(14, 10))
     
-    ax.plot(doping_range, M_values, 'r-o', linewidth=2, markersize=6, label='AFM (M)')
-    ax.plot(doping_range, Q_values, 'g-s', linewidth=2, markersize=6, label='JT Distortion (Q)')
-    ax.plot(doping_range, Delta_values, 'b-^', linewidth=2, markersize=6, label='SC Gap (Δ)')
+    # Panel 1: Main phase diagram
+    _plot_phase_data(axes[0, 0], phase_data)
     
-    ax.set_xlabel('Doping δ', fontsize=14)
-    ax.set_ylabel('Order Parameters', fontsize=14)
-    ax.set_title('Phase Diagram: SC-Activated JT Mechanism (Correct Physics)', fontsize=15, fontweight='bold')
-    ax.legend(fontsize=12)
+    # Crystal field sweet spot search
+    print("\n\nCrystal field sweet spot search:")
+    print(f"Scanning Delta_CF from {cf_min:.3f} to {cf_max:.3f} eV")
+    
+    original_cf = solver.p.Delta_CF
+    ref_doping_idx = len(doping_range) // 2
+    ref_doping = doping_range[ref_doping_idx]
+    ref_density = 1.0 - ref_doping
+    
+    print(f"Reference doping: δ={ref_doping:.3f}")
+    
+    # Crystal field scan
+    cf_range = np.linspace(cf_min, cf_max, N_cf)
+    cf_gaps, cf_Q_values, cf_M_values = [], [], []
+    cf_previous = None
+    
+    for cf in cf_range:
+        solver.p.Delta_CF = cf
+        
+        if cf_previous is not None:
+            init_M, init_Q, init_Delta = cf_previous['M'], cf_previous['Q'], cf_previous['Delta']
+        else:
+            init_M = phase_data['M'][ref_doping_idx]
+            init_Q = phase_data['Q'][ref_doping_idx]
+            init_Delta = phase_data['Delta'][ref_doping_idx]
+        
+        # Solve at this CF value
+        result = solver.solve_self_consistent(
+            target_density=ref_density,
+            initial_M=init_M, initial_Q=init_Q, initial_Delta=init_Delta,
+            verbose=False
+        )
+        
+        cf_gaps.append(result['Delta'])
+        cf_Q_values.append(result['Q'])
+        cf_M_values.append(result['M'])
+        
+        # Update warm-start
+        cf_previous = {'M': result['M'], 'Q': result['Q'], 'Delta': result['Delta']}
+        
+        print(f"  ΔCF={cf:.3f} → Δ={result['Delta']:.4f}, Q={result['Q']:.4f}, M={result['M']:.3f}")
+    
+    # Restore original Delta_CF
+    solver.p.Delta_CF = original_cf
+    
+    # Find sweet spot
+    max_gap_idx = np.argmax(cf_gaps)
+    sweet_spot_cf = cf_range[max_gap_idx]
+    max_gap = cf_gaps[max_gap_idx]
+    
+    print(f"\n✓ Sweet spot: ΔCF = {sweet_spot_cf:.3f} eV, Δmax = {max_gap:.4f} eV")
+    
+    # Panel 2: Sweet spot
+    ax = axes[0, 1]
+    ax.plot(cf_range, cf_gaps, 'b-o', linewidth=2, markersize=6)
+    ax.axvline(sweet_spot_cf, color='r', linestyle='--', label=f'Sweet spot: {sweet_spot_cf:.3f} eV')
+    ax.set_xlabel('Crystal Field ΔCF (eV)', fontsize=12)
+    ax.set_ylabel('SC Gap Δ (eV)', fontsize=12)
+    ax.set_title(f'Sweet Spot Search (δ={ref_doping:.3f})', fontsize=13, fontweight='bold')
+    ax.legend(fontsize=10)
     ax.grid(True, alpha=0.3)
-    ax.set_xlim([doping_range[0], doping_range[-1]])
     
-    # Mark expected regions
-    ax.axvspan(0, 0.03, alpha=0.1, color='red', label='AFM Phase')
-    ax.axvspan(0.05, 0.15, alpha=0.1, color='blue', label='SC+JT Phase')
+    # Panel 3: Q vs CF
+    ax = axes[1, 0]
+    ax.plot(cf_range, cf_Q_values, 'g-s', linewidth=2, markersize=6)
+    ax.set_xlabel('Crystal Field ΔCF (eV)', fontsize=12)
+    ax.set_ylabel('JT Distortion Q (Å)', fontsize=12)
+    ax.set_title('Q vs Crystal Field', fontsize=13)
+    ax.grid(True, alpha=0.3)
+    
+    # Panel 4: M vs CF
+    ax = axes[1, 1]
+    ax.plot(cf_range, cf_M_values, 'r-^', linewidth=2, markersize=6)
+    ax.set_xlabel('Crystal Field ΔCF (eV)', fontsize=12)
+    ax.set_ylabel('Magnetization M', fontsize=12)
+    ax.set_title('M vs Crystal Field', fontsize=13)
+    ax.grid(True, alpha=0.3)
     
     plt.tight_layout()
     return fig
 
+def _plot_phase_data(ax, phase_data: Dict):
+    """
+    Plot phase diagram from phase_data structure. This function ONLY uses converged final states.
+    """
+
+    doping = np.array(phase_data['doping'])
+    M = np.array(phase_data['M'])
+    Q = np.array(phase_data['Q'])
+    Delta = np.array(phase_data['Delta'])
+    
+    # Plot order parameters vs doping
+    ax.plot(doping, M, 'r-o', linewidth=2, markersize=6, label='AFM (M)')
+    ax.plot(doping, Q, 'g-s', linewidth=2, markersize=6, label='JT Distortion (Q)')
+    ax.plot(doping, Delta, 'b-^', linewidth=2, markersize=6, label='SC Gap (Δ)')
+    
+    ax.set_xlabel('Doping δ', fontsize=14)
+    ax.set_ylabel('Order Parameters', fontsize=14)
+    ax.set_title('Phase Diagram: SC-Activated JT Mechanism', fontsize=15, fontweight='bold')
+    ax.legend(fontsize=12)
+    ax.grid(True, alpha=0.3)
+    ax.set_xlim([doping[0], doping[-1]])
+    
+    # Mark expected phase regions (optional)
+    if doping[-1] >= 0.03:
+        ax.axvspan(0, 0.03, alpha=0.1, color='red', label='AFM dominant')
+    if doping[-1] >= 0.15:
+        ax.axvspan(0.05, 0.15, alpha=0.1, color='blue', label='SC+JT coexistence')
+    plt.tight_layout()
+    
+def plot_dos(solver: RMFT_Solver, result: Dict):
+    """
+    Plot the density function (DOS) of the system to see the van Hove peaks.
+    """
+    all_energies = []
+    M, Q, Delta, mu, t_eff, J_eff = (
+        result['M'], 
+        result['Q'], 
+        result['Delta'], 
+        result['mu'],  
+        result['t_eff'],  
+        result['J_eff']
+    )
+
+    for kvec in solver.k_points:
+        H_BdG = solver.build_bdg_matrix(kvec, M, Q, Delta, mu, t_eff, J_eff)
+        vals = np.linalg.eigvalsh(H_BdG)
+        all_energies.extend(vals)
+
+    all_energies = np.array(all_energies)
+
+    fig, ax = plt.subplots(1, 1, figsize=(14, 8))
+
+    ax.hist(all_energies, bins=200, density=True, color='blue', alpha=0.7, label='DOS')
+
+    # Fermi level (E = mu, but in BdG 0 is the Fermi level)
+    ax.axvline(x=0.0, color='red', linestyle='--', label='Fermi Level ($E_F$)')
+    ax.set_title(
+        f"Density of States (DOS)\n"
+        f"$\\Delta_{{CF}}={solver.p.Delta_CF}$, "
+        f"Doping={result.get('doping', 'N/A')}"
+    )
+    ax.set_xlabel("Energy (eV)")
+    ax.set_ylabel("Density")
+    ax.legend()
+    ax.grid(True)
+    fig.tight_layout()
+
+    # Check: Is there a peak at 0?
+    hist, bin_edges = np.histogram(all_energies, bins=200, density=True)
+    bin_centers = 0.5 * (bin_edges[:-1] + bin_edges[1:])
+    
+    peaks, _ = find_peaks(hist, prominence=0.1 * np.max(hist))
+    vhs_energies = bin_centers[peaks]
+    
+    print(f"\nVan Hove singularities detected at energies: {vhs_energies}")
+    fermi_distance = np.min(np.abs(vhs_energies)) if len(vhs_energies) > 0 else np.inf
+    print(f"Closest VHS to Fermi level: {fermi_distance:.4f} eV")
+    return fig
+    
 # =============================================================================
 # 6. MAIN EXECUTION
 # =============================================================================
@@ -1213,18 +1310,21 @@ if __name__ == "__main__":
     # Setup physical parameters
     # =========================================================================
     params = ModelParams(
-        t0=0.5,           # eV - moderate hopping
+        t0=0.4,           # eV - moderate hopping
         U=3.0,            # eV - charge transfer regime
-        Delta_CF=0.1,     # eV - small CF splitting (quasi-degenerate)
-        g_JT=0.15,        # eV/Å - moderate e-ph coupling
-        K_lattice=5.0,    # eV/Å² - phonon stiffness
-        beta=0.5,         # dimensionless
+        Delta_CF=0.01,    # eV - small CF splitting (quasi-degenerate)
+        g_JT=1.5,         # eV/Å - moderate e-ph coupling
+        K_lattice=1.5,    # eV/Å² - phonon stiffness
+        beta=116,         # 1/eV  - β = 1/(k​T), β = 500 is the ~ 0 K
         eta=0.1,          # weak AFM on Γ₇
         Z=4,              # 2D square lattice
-        nk=32,            # k-grid resolution
-        kT=0.01,          # temperature ~ 116 K
+        nk=64,            # k-grid resolution, minimal nk ​≈ 16⋅δ⋅t0​​ / ((1 + δ) ⋅ kT)
+        kT=0.006,         # temperature: 0.01 eV ~ 116 K
+        a=1.0,
         max_iter=100,
-        mixing=0.3
+        tol = 1e-6,
+        mixing=0.1,
+        mu_adjust_rate=0.07
     )
     
     solver = RMFT_Solver(params)
@@ -1239,37 +1339,16 @@ if __name__ == "__main__":
     
     result_halffill = solver.solve_self_consistent(
         target_density=0.98,  # δ = 0.02
-        initial_M=0.8,
+        initial_M=0.1,
         initial_Q=0.0,
         initial_Delta=0.05,
-        lambda_cluster=1.0,  # Balanced BdG + cluster
         verbose=True
     )
-    
-    fig1 = plot_convergence(result_halffill, 
-                           title="Case 1: Near Half-Filling (Pure AFM Phase)")
-    
-    # =========================================================================
-    # Case 2: Optimal doping
-    # Expected: SC+JT coexistence, reduced AFM, CLEAR SC → JT feedback
-    # =========================================================================
-    print("\n" + "="*70)
-    print("CASE 2: Optimal Doping (δ = 0.10)")
-    print("="*70)
-    
-    result_optimal = solver.solve_self_consistent(
-        target_density=0.90,  # δ = 0.10
-        initial_M=0.5,
-        initial_Q=0.0,
-        initial_Delta=0.05,
-        lambda_cluster=1.0,
-        verbose=True
-    )
-    
-    fig2 = plot_convergence(result_optimal, title="Case 2: Optimal Doping (SC+JT Coexistence)")
+    fig1 = plot_convergence(result_halffill, title="Case 1: Near Half-Filling (Pure AFM Phase)")
+    fig2 = plot_dos(solver, result_halffill)
     
     # =========================================================================
-    # Case 3: Heavy doping
+    # Case 2: Heavy doping
     # Expected: Weak AFM, SC without strong JT
     # =========================================================================
     print("\n" + "="*70)
@@ -1278,15 +1357,13 @@ if __name__ == "__main__":
     
     result_heavy = solver.solve_self_consistent(
         target_density=0.80,  # δ = 0.20
-        initial_M=0.3,
+        initial_M=0.1,
         initial_Q=0.0,
         initial_Delta=0.05,
-        lambda_cluster=1.0,
         verbose=True
     )
-    
-    fig3 = plot_convergence(result_heavy,
-                           title="Case 3: Heavy Doping (Conventional SC)")
+    fig3 = plot_convergence(result_heavy, title="Case 3: Heavy Doping (Conventional SC)")
+    fig4 = plot_dos(solver, result_heavy)
     
     # =========================================================================
     # Phase diagram scan
@@ -1296,8 +1373,8 @@ if __name__ == "__main__":
     print("="*70)
     
     doping_scan = np.linspace(0.01, 0.25, 10)
-    fig4 = plot_phase_diagram(solver, doping_scan)
-    
+    fig5 = plot_phase_diagrams(solver, doping_scan)
+
     # =========================================================================
     # Display all figures
     # =========================================================================
