@@ -30,6 +30,8 @@ In a standard picture, the Jahn–Teller (JT) effect *precedes* superconductivit
 - only in this paired subspace does **rank-2 multipolar order become accessible**, and
 - the B₁g JT distortion emerges as an **induced response** of the superconducting condensate — not as a primary instability.
 
+The "attractive interaction" does not arise from an a priori constant: it comes from the fact that `⟨τ_x⟩ = 0` in the normal state while `⟨τ_x²⟩ ≠ 0`, and the Cooper-pair mixing opens a channel in which the JT distortion is symmetry-allowed but only cooperatively accessible — without the SC condensate, it is symmetry-blocked.
+
 The symmetry selection rules that encode this:
 
 | State | Condition | Meaning |
@@ -37,7 +39,7 @@ The symmetry selection rules that encode this:
 | AFM ground state | Γ_JT ⊄ Γ_AFM ⊗ Γ_AFM | JT **forbidden** |
 | SC condensate | Γ_JT ⊂ Γ_pair ⊗ Γ_pair | JT **allowed** |
 
-For Eg-symmetry Cooper pairs: Eg ⊗ Eg = A₁g ⊕ A₂g ⊕ **B₁g** ⊕ B₂g — the full JT spectrum is present.
+For B₁g-symmetry Cooper pairs: the SC condensate transfers the order parameter into an irrep channel that is self-closing under the tensor product with the Cooper-pair irrep family, and in which rank-2 multipolar operators — including the B₁g JT mode — are no longer forbidden.
 
 ---
 
@@ -45,15 +47,15 @@ For Eg-symmetry Cooper pairs: Eg ⊗ Eg = A₁g ⊕ A₂g ⊕ **B₁g** ⊕ B₂
 
 ### 1. Local Hilbert Space and SOC+CF Hamiltonian
 
-The system is a Mott/charge-transfer insulator at half-filling (δ = 0). The full SOC + D₄h crystal-field Hamiltonian is constructed and diagonalized explicitly in the t₂g manifold (6×6):
+The full SOC + D₄h crystal-field Hamiltonian is constructed and diagonalized explicitly in the t₂g manifold (6×6):
 
 ```
 H = λ_SOC · L·S  +  Δ_axial · Lz²  +  Δ_inplane · (Lx² − Ly²)
 ```
 
-This diagonalization yields the Γ₆–Γ₇ splitting `Δ_CF` as a derived quantity (not a free parameter). The four-component local basis is `[6↑, 6↓, 7↑, 7↓]`. The Γ₆ doublet has no intrinsic quadrupole moment; it only develops one when coherently mixed with Γ₇ by the SC condensate.
+This diagonalization yields the Γ₆–Γ₇ splitting `Δ_CF` as a **derived quantity** (not a free parameter). The four-component local basis is `[6↑, 6↓, 7↑, 7↓]`. The Γ₆ doublet has no intrinsic quadrupole moment; it only develops one when coherently mixed with Γ₇ by the SC condensate.
 
-- `Δ_axial = Δ_tetra · Lz²` — controls the Γ₆–Γ₇ gap independently of λ_SOC; negative values encode tetragonal compression.
+- `Δ_axial = Δ_tetra · Lz²` — controls the Γ₆–Γ₇ gap; **required < 0** (tetragonal compression, c < a).
 - `Δ_inplane = Δ_inplane · (Lx² − Ly²)` — splits the Γ₇ quartet into two Kramers doublets (Γ₇a, Γ₇b) without removing Kramers degeneracy, preventing spontaneous JT in the normal state.
 
 ### 2. Stoner–Heisenberg Weiss Field
@@ -64,58 +66,63 @@ The mean-field AFM Zeeman splitting combines a Hartree–Fock Stoner term and a 
 h_AFM = g_J · f(δ) · (U_mf/2 + Z·2t²/U) · M/2
 ```
 
-where `f(δ) = δ/(δ + δ₀)` is a regularization factor that suppresses the unphysical g_J → 4 divergence near half-filling. `U_mf = 0.5·Δ_CF` is the screened Weiss-field amplitude (ZSA charge-transfer scale, much smaller than the bare U). The Γ₇ orbital feels a reduced splitting `η × h_AFM` controlled by the asymmetry parameter `η`.
+where `f(δ) = δ/(δ + δ₀)` suppresses the unphysical g_J → 4 divergence near half-filling. `U_mf = 0.5·Δ_CF` is the screened Weiss-field amplitude (ZSA charge-transfer scale, much smaller than the bare U). The Γ₇ orbital feels a reduced splitting `η × h_AFM` controlled by the asymmetry parameter `η`.
 
 ### 3. Gutzwiller Renormalization (Mott physics)
 
-Near half-filling, the Mott insulator physics is captured via Gutzwiller factors as a function of doping δ = 1 − n:
+Near half-filling, the Mott insulator physics is captured via Gutzwiller factors as a function of doping δ = 1 − n. The new code uses **channel-specific anomalous amplitude factors** reflecting the multi-orbital nature of the pairing:
 
 ```
-g_t = 2δ / (1 + δ)      # Kinetic energy suppression → 0 at half-filling
-g_J = 4 / (1 + δ)²      # Exchange enhancement → 4 at half-filling
-g_Δ = g_t               # Anomalous amplitude renormalization
+g_t       = 2δ / (1 + δ)         # Kinetic energy suppression → 0 at half-filling
+g_J       = 4 / (1 + δ)²         # Exchange enhancement → 4 at half-filling
+g_Delta_s = sqrt(g_t)             # On-site Γ₆⊗Γ₇ inter-orbital singlet:
+                                  #   geometric mean of g_{t,Γ6}=g_t and g_{t,Γ7}≈1
+                                  #   (Γ7 nearly empty: Δ_CF >> kT)
+g_Delta_d = g_J                   # Inter-site d-wave B₁g: same vertex as superexchange
 ```
 
-At δ = 0 the hopping is fully suppressed and the system is a Mott insulator with pure AFM order.
+`g_Delta_s` and `g_Delta_d` are **independent**, reflecting the different physical renormalization of the two pairing channels. `g_Delta_s ∈ (g_t, 1)` provides intermediate suppression; `g_Delta_d = g_J` is strongest at half-filling.
 
 ### 4. B₁g Jahn–Teller Distortion and Anisotropic Hopping
 
-The B₁g mode breaks the x–y symmetry of the square lattice. Bond-length arguments give an exponential hopping law:
+The B₁g mode breaks the x–y symmetry of the square lattice:
 
 ```
 tx(Q) = t₀ · exp(+Q / λ_hop)    # x-bonds shorten → larger hopping
 ty(Q) = t₀ · exp(−Q / λ_hop)    # y-bonds lengthen → smaller hopping
 ```
 
-`λ_hop` is the hopping decay length set by M–O bond geometry (~1–2 Å for 3d-oxide perovskites) and is an explicit primary input. The phonon spring constant is:
+The phonon spring constant is derived from the dimensionless stability margin `alpha_K`:
 
 ```
-K_lattice = g_JT² / (λ_JT · t₀)
+K_lattice = g_JT² / (alpha_K · Δ_CF)
 ```
 
-where `λ_JT` is a dimensionless ratio. SC-triggered (not spontaneous) JT requires `λ_JT < Δ_CF / t₀`.
+`alpha_K > 1` ensures `K > K_spont = g_JT²/Δ_CF`, i.e., the phonon does not go soft spontaneously before the SC condensate forms. This is validated at construction time — a value `alpha_K ≤ 1` raises an error.
 
-The effective superexchange is Q-dependent and regularized near half-filling:
-
+The SC-triggered JT feedback strength is characterized by:
 ```
-J(Q, δ) = g_J · 4⟨t̃²⟩/U · f(δ)     where ⟨t̃²⟩ = (tx² + ty²)/2
+lambda_JT = (g_JT² / K) · chi_tau
 ```
+The viable regime is `0.05 < lambda_JT < 1.0`: below 0.05 the JT channel is closed (strong AFM or large Δ_CF), at or above 1.0 there is spontaneous JT risk.
 
 ### 5. Dual B₁g Pairing Channels
 
-Two symmetry-equivalent B₁g pairing channels are treated simultaneously:
+Two symmetry-equivalent B₁g pairing channels are treated simultaneously with **independent strengths**:
 
 - **Channel s** — on-site inter-orbital singlet (Γ₆⊗Γ₇ → B₁g via orbital indices, φ = 1):
   ```
   D_s = Δ_s · (|6↑⟩⟨7↓| − |6↓⟩⟨7↑|)
+  V_s = V_s_scale · g_JT² / K_lattice   (eV)
   ```
 
 - **Channel d** — inter-site d-wave (φ(k) = cos kx − cos ky → B₁g in k-space):
   ```
   D_d = Δ_d · φ(k) · (|A:6↑⟩⟨B:7↓| − |A:6↓⟩⟨B:7↑|)
+  V_d = V_d_scale · g_JT² / K_lattice   (eV)
   ```
 
-The `channel_mix` parameter controls the V_s / V_d split of the total pairing strength `g_JT²/K`. Both channels have B₁g symmetry and are treated by separate gap equations with no double-counting.
+`V_s_scale` and `V_d_scale` are **independent** dimensionless parameters (not constrained to sum to 1). This replaces the old `channel_mix` scalar. Their ratio determines the relative weight of the two B₁g channels; `V_s_scale + V_d_scale` controls total coupling strength. Both channels are treated by separate gap equations with channel-specific Gutzwiller factors and no double-counting.
 
 ### 6. 16×16 BdG Hamiltonian (doubled unit cell)
 
@@ -137,7 +144,7 @@ BdG = ┌────────────────────┬──�
       └────────────────────┴─────────────────────┘
 ```
 
-The anisotropic hopping `tx ≠ ty` (B₁g JT) enters the kinetic block `T(k) = −2[tx cos kx + ty cos ky] · I₄`.
+The anisotropic hopping `tx ≠ ty` (B₁g JT) enters the kinetic block `T(k) = −2[tx cos kx + ty cos ky] · I₄`. All BdG construction is handled by `VectorizedBdG._build_H_stack()`, which accepts an arbitrary k-point array and an optional pre-allocated output buffer.
 
 ### 7. Irrep Selection and SC-Activated JT
 
@@ -154,23 +161,46 @@ The selection ratio `R = w · |⟨τ_x⟩| / τ_x,max` is tracked throughout the
 
 ### 8. RPA Spin-Fluctuation Enhancement
 
-The static transverse spin susceptibility χ₀(q_AFM) is computed at q = (π, π) using BdG coherence factors:
+The static transverse spin susceptibility χ₀(q_AFM) is computed at q = (π, π) using BdG coherence factors. The even k-grid is exploited so that q_AFM = (π, π) maps each grid point exactly to another via the precomputed permutation `chi0_Q_idx` — eliminating a full second LAPACK call:
 
 ```
-χ₀ = (1/N) Σ_{k,n,m} |M_{nm}(k,k+Q)|² · (f_n − f_m) / (E_m − E_n)
+E(k+Q) = E_k_all[chi0_Q_idx],    V(k+Q) = V_k_all[chi0_Q_idx]
 ```
 
-The RPA Stoner factor enhances the effective pairing interaction near the AFM quantum critical point:
+The RPA Stoner factor enhances the effective pairing interaction:
 
 ```
-rpa_factor = 1 / max(1 − U_eff_chi · χ₀,  rpa_cutoff)
+rpa_factor = 1 / max(1 − U_eff · χ₀,  rpa_cutoff)
 ```
 
-where `U_eff_chi = g_J · J_eff` (renormalized coupling, not bare U) keeps the denominator O(1) within the ordered phase. The susceptibility is updated lazily (only when M or |Δ| change by more than a threshold) to avoid abrupt V_eff jumps during iteration.
+The multipolar susceptibility `χ_τx` is also computed as a diagnostic for JT channel activation: it is suppressed when M is large (deep AFM) and enters directly into the `lambda_JT` score.
 
-The multipolar susceptibility `χ_τx ~ N(0) / (1 + α·M²)` is also computed as a diagnostic for JT channel activation: it is suppressed when M is large (deep AFM) and recovers as M decreases toward the AFM QCP.
+### 9. Variational Free Energy
 
-### 9. Observables: Correct BdG Thermal Averages
+The BdG grand potential per site (with 1/2 for doubled unit cell):
+
+```
+Ω_BdG = (1/2) Σ_{k,n} w_k [E_n(k) f(E_n) − T S(f_n)]
+        + |Δ_s|²/(g_Delta_s · V_s) + |Δ_d|²/(g_Delta_d · V_d)
+        + (K/2)Q²
+```
+
+The condensation correction terms use **independent** Gutzwiller factors per channel: `g_Delta_s = sqrt(g_t)` for the on-site channel, `g_Delta_d = g_J` for the inter-site d-wave channel.
+
+### 10. Analytic ∂F/∂M and ∂²F/∂M² (Single Diagonalization)
+
+The gradient and curvature of the free energy with respect to the AFM order parameter are computed analytically from a **single BdG diagonalization** using second-order perturbation theory, replacing the old three-point finite-difference stencil (3 LAPACK calls → 1):
+
+```
+∂F/∂M  = Σ_{k,n} f_n · ⟨ψ_n|∂H/∂M|ψ_n⟩                                (Hellmann–Feynman)
+
+∂²F/∂M² = Σ_{k,n} (∂f_n/∂E_n) · ⟨ψ_n|∂H|ψ_n⟩²                         (diagonal term)
+         + Σ_{k,n≠m} (f_n − f_m)/(E_m − E_n) · |⟨ψ_n|∂H|ψ_m⟩|²        (off-diagonal term)
+```
+
+Since `∂H/∂M` is diagonal in the BdG basis, the matrix elements reduce to simple inner products. The Newton step for M uses the analytic curvature with Levenberg–Marquardt regularization.
+
+### 11. Observables: BdG Thermal Averages
 
 From the BdG eigensystem `{E_n, |ψ_n⟩}` with 16-component spinors:
 
@@ -182,9 +212,9 @@ From the BdG eigensystem `{E_n, |ψ_n⟩}` with 16-component spinors:
 | Pairing s | F_AA = u_A[6↑] · v_A[7↓]* − u_A[6↓] · v_A[7↑]* (on-site, no φ weight) |
 | Pairing d | F_AB = u_A[6↑] · v_B[7↓]* − u_A[6↓] · v_B[7↑]* (inter-site, φ(k) weight in BdG) |
 
-All observables use the `(1−2f)` factor for pairing amplitudes, which is critical for correct finite-temperature gap behavior and proper Tc estimation.
+All observables are computed in a single batched LAPACK call via `VectorizedBdG`, with full NumPy broadcasting over the k-axis (no Python loops over k-points).
 
-### 10. Two-Site Cluster: Quantum Multipolar Fluctuations
+### 12. Two-Site Cluster: Quantum Multipolar Fluctuations
 
 Beyond the BdG mean field, a 2-site (A–B sublattice) cluster is exactly diagonalized at each iteration. The cluster Hamiltonian lives in the 16×16 tensor product space of the two 4-component sites:
 
@@ -194,41 +224,23 @@ H_cluster = H_sp(A) ⊗ I + I ⊗ H_sp(B)
           + Z_boundary · (g_J · U_mf/2 + J_eff) · M_ext · (O_A ⊗ I + I ⊗ O_B)
 ```
 
-where the multipolar operator `O = (P₆ + η·P₇) ⊗ σz`. The boundary field matches the BdG Weiss field (both Stoner and Heisenberg terms renormalized by g_J).
-
-The final magnetization blends BdG and cluster contributions via `CLUSTER_WEIGHT`:
+where the multipolar operator `O = (P₆ + η·P₇) ⊗ σz`. The final magnetization blends BdG and cluster contributions via `CLUSTER_WEIGHT`:
 
 ```
 M_fixpoint = (1 − CLUSTER_WEIGHT) · M_BdG + CLUSTER_WEIGHT · M_cluster
 ```
 
-The cluster also computes both quadrupole observables:
-- `⟨τ_x⟩`: classical expectation value
-- `√⟨τ_x²⟩`: RMS quadrupole including quantum fluctuations
+The cluster also computes both quadrupole observables: `⟨τ_x⟩` (classical) and `√⟨τ_x²⟩` (RMS including quantum fluctuations). Since `[τ_x, H_cluster] ≠ 0`, these are genuinely different.
 
-Since `[τ_x, H_cluster] ≠ 0`, these are genuinely different.
+### 13. Chemical Potential: Newton's Method with Analytic ∂n/∂μ
 
-### 11. Variational Free Energy
-
-The BdG grand potential per site (with 1/2 for doubled unit cell):
+At each SCF iteration, μ is found by **Newton's method** using the analytic derivative:
 
 ```
-Ω_BdG = (1/2) Σ_{k,n} w_k [E_n(k) f(E_n) − T S(f_n)]
-        + |Δ_s|²/(g_Δ·V_s) + |Δ_d|²/(g_Δ·V_d)
-        + (K/2)Q²
+∂n/∂μ = Σ_{k,n} w_k · f(E_n)(1−f(E_n)) / kT · (|u_A|² + |u_B|² + |v_A|² + |v_B|²)
 ```
 
-The condensation correction terms `|Δ|²/(g_Δ·V)` correct for double-counted energy in the BdG mean-field decoupling. Equilibrium is found at `∂F/∂M = 0`, `∂F/∂Q = 0`.
-
-### 12. Chemical Potential and Density Constraint
-
-At each iteration, μ is found by Brent's root-finding method on:
-
-```
-n(μ; M, Q, Δ_s, Δ_d) − n_target = 0
-```
-
-with automatic bracket expansion up to ±6t₀ around the current guess.
+computed from the same BdG eigensystem as n(μ). Each Newton step costs one diagonalization (typically converges in 3–6 steps). Brent's method is retained as a fallback if Newton diverges or lands on a flat region.
 
 ---
 
@@ -240,80 +252,139 @@ _gamma_splitting(...)                          → Γ₆–Γ₇a gap (derived �
 
 ModelParams (dataclass)
     └── primary inputs → derived: Delta_CF, U, U_mf, K_lattice, t_pd
-    └── summary()      → coexistence-window diagnostics
+    └── __post_init__()  recomputes ALL derived quantities when primary inputs change
+    └── summary()        coexistence-window diagnostics and parameter print
 
 ClusterMF
-    ├── build_multipolar_operator(η)            → 4×4 O = (P₆ + η·P₇)⊗σz
-    ├── cluster_afm_exchange(J_eff, η)          → 16×16 J·O⊗O
-    ├── boundary_afm_field(J_eff, M, η, U_mf, g_J)  → 4×4 Weiss field
-    ├── build_cluster_hamiltonian(...)          → 16×16 full cluster H
-    └── cluster_expectation(evals, evecs, O, T, site_index)  → thermal ⟨O⟩
+    ├── build_multipolar_operator(η)
+    ├── cluster_afm_exchange(J_eff, η)
+    ├── boundary_afm_field(J_eff, M, η, U_mf, g_J)
+    ├── build_cluster_hamiltonian(...)
+    └── cluster_expectation(evals, evecs, O, T, site_index)
+
+VectorizedBdG  (performance kernel, lives inside RMFT_Solver)
+    ├── _build_H_stack(kpts, ..., out=)        → (N, 16, 16) BdG stack, in-place optional
+    ├── diag_all_k(...)                        → (N_k,16), (N_k,16,16) — full grid, reuses buffer
+    ├── diag_kpts(kpts, ...)                   → (N,16), (N,16,16)   — arbitrary sub-grid
+    └── compute_observables_vectorized(...)    → M, Q, n, Pair_s, Pair_d from cached eigensystem
 
 RMFT_Solver
-    ├── get_gutzwiller_factors(δ)               → g_t, g_J, g_Δ
-    ├── effective_hopping_anisotropic(Q)        → tx, ty
-    ├── effective_superexchange(Q, g_J, tx, ty, δ) → J(Q,δ)
-    ├── dispersion(k, tx, ty)                   → γ(k) = −2[tx cos kx + ty cos ky]
-    ├── build_irrep_selection_projector(Δ)      → P_eff (Γ₆ → Γ₆⊕Γ₇ lifting)
-    ├── compute_rank2_multipole_expectation(Δ, τx_bdg) → selection ratio R
-    ├── compute_static_chi0_afm(...)            → χ₀(q_AFM), Stoner denom, χ_τx
-    ├── rpa_stoner_factor(chi0_result)          → rpa_factor ≥ 1
-    ├── solve_gap_equation_k(...)               → Δ_s_new, Δ_d_new (dual channel)
-    ├── build_local_hamiltonian_for_bdg(...)    → 4×4 H_A or H_B
-    ├── build_pairing_block(Δ_s)               → 4×4 D_s (on-site orbital singlet)
-    ├── build_inter_site_pairing_block(Δ_d, k) → 4×4 D_d (d-wave inter-site)
-    ├── build_bdg_matrix(k, ...)               → 16×16 full BdG H(k)
-    ├── compute_observables_from_bdg(...)      → M, Q, n, Pair_s, Pair_d
-    ├── compute_bdg_free_energy(...)           → Ω_BdG per site
+    ├── get_gutzwiller_factors(δ)              → g_t, g_J, g_Delta_s, g_Delta_d
+    ├── effective_hopping_anisotropic(Q)       → tx, ty
+    ├── effective_superexchange(Q, g_J, ...)   → J(Q,δ)
+    ├── build_irrep_selection_projector(Δ)     → P_eff (Γ₆ → Γ₆⊕Γ₇ lifting)
+    ├── compute_rank2_multipole_expectation(.) → selection ratio R
+    ├── compute_static_chi0_afm(...)           → χ₀(q_AFM) via chi0_Q_idx permutation trick
+    ├── compute_chi0_tensor(q, ..., _E_k_cache) → 4×4 orbital χ₀ with optional k-cache reuse
+    ├── build_pairing_kernel(fermi_pts, ...)   → Γ_{ij} with q-deduplication and triangle symmetry
+    ├── solve_gap_equation_k(...)              → Δ_s_new, Δ_d_new (dual channel, independent g_Δ)
+    ├── build_local_hamiltonian_for_bdg(...)   → 4×4 H_A or H_B
+    ├── build_pairing_block(Δ_s)              → 4×4 D_s (on-site orbital singlet)
+    ├── compute_dF_dM(...)                     → thin wrapper → compute_dF_dM_and_d2F
+    ├── compute_dF_dM_and_d2F(...)             → (∂F/∂M, ∂²F/∂M²) from single diag
+    ├── compute_bdg_free_energy(...)           → Ω_BdG with per-channel g_Δ factors
     ├── compute_cluster_free_energy(...)       → F_cluster + observables
-    ├── solve_self_consistent(...)             → main SCF loop
-    ├── compute_dF_dM(...)                     → ∂F/∂M via Hellmann–Feynman
-    ├── compute_hessian(...)                   → post-convergence 3×3 Hessian
+    ├── _find_mu_for_density(...)              → Newton (analytic ∂n/∂μ) + Brent fallback
     ├── _anderson_mix(...)                     → quasi-Newton convergence (M, Q)
-    ├── _find_mu_for_density(...)              → Brent root-finding for μ
-    └── _compute_k_observables(...)            → weighted BZ integration
+    └── solve_self_consistent(...)             → main SCF loop with per-iter BdG cache
+
+Optimisation (two-stage)
+    ├── run_scf_material(solver, doping, Δ_tet, u, g_JT, Vs, Vd, ...)
+    │       calls __post_init__ → consistent derived params → solve_self_consistent
+    ├── BayesianOptimizer (Stage 1: 3D material space)
+    │   ├── _cheap_scout(doping, Δ_tet, u, gJT)        cheap physics filter (no full SCF)
+    │   ├── _adaptive_seed_near_critical(n_refine)      biased seeding at λ_eff ≈ 1
+    │   ├── _evaluate_material(Δ_tet, u, gJT)           inner doping scan, warm-started
+    │   ├── _jt_coupling_strength(solver, result)       lambda_JT = (g²/K)·chi_tau
+    │   ├── _jt_causality_test(solver, result)          SC-triggered JT verification
+    │   ├── _score(Delta, converged, result, solver)    physics-motivated objective
+    │   └── optimize(n_initial, n_refine, n_iterations) 3-phase BO loop
+    ├── ChannelOptimizer (Stage 2: 2D channel space)
+    │   ├── _run_scf(Vs, Vd)                            single SCF at fixed material
+    │   └── optimize()                                   5×5 grid + GP-EI refinement
+    └── full_bayesian_optimize(solver, ...)              two-stage pipeline wrapper
 
 Visualization
-    ├── plot_phase_diagrams(solver, δ_scan)    → 3×3 panel figure
-    ├── _plot_phase_data(ax, phase_data)       → phase diagram panel
-    └── _plot_dos(ax, solver, result)          → DOS with VHS detection
+    ├── plot_phase_diagrams(solver, δ_scan, opt_result)   3×3 (or 4×3) panel figure
+    ├── _plot_phase_data(ax, phase_data)                  phase diagram panel
+    └── _plot_dos(ax, solver, result)                     DOS via vectorized BdG
 ```
 
 ---
 
 ## Key Algorithms
 
+### VectorizedBdG: Batched LAPACK and Buffer Reuse
+
+All BdG diagonalization is centralized in the `VectorizedBdG` class. Key optimizations:
+
+- `_build_H_stack(kpts, out=)` accepts an optional pre-allocated `(N, 16, 16)` buffer. On the hot SCF path (full grid, `out=self._H_stack`), no heap allocation occurs per iteration.
+- `diag_all_k()` fills the pre-allocated stack and calls a single `np.linalg.eigh`.
+- `diag_kpts(kpts)` handles arbitrary sub-grids (e.g., k+Q for χ₀), allocating a fresh buffer.
+- For the d-wave form factor φ(k): the cached `solver.phi_k` array is reused when `out` is provided (full grid); otherwise it is recomputed from `kpts` (sub-grid path).
+
+### Per-Iteration BdG Cache
+
+Within each SCF iteration the BdG eigensystem `(ev, ec)` is computed **once** at the top and shared by:
+1. Observable computation (`compute_observables_vectorized`)
+2. Dual-channel gap equations (`solve_gap_equation_k`)
+3. ∂F/∂M and ∂²F/∂M² (`compute_dF_dM_and_d2F`)
+
+The cache is stored in `self._scf_bdg_cache` and explicitly cleared after use to prevent stale reuse in subsequent iterations.
+
+### χ₀(q_AFM): Permutation Trick
+
+The even k-grid is constructed so that adding q_AFM = (π, π) maps each grid point exactly to another grid point. The precomputed index array `chi0_Q_idx` implements this as a free permutation:
+
+```python
+E_kQ_all = E_k_all[chi0_Q_idx]   # (N,16)  — no LAPACK, just index reorder
+V_kQ_all = V_k_all[chi0_Q_idx]   # (N,16,16)
+```
+
+This eliminates an entire second LAPACK call compared to the naive approach.
+
 ### Dual k-Grid Setup
 
-Two separate k-grids are maintained throughout the simulation:
+Two separate k-grids are maintained:
 
 - **SCF / Simpson grid (odd, nk+1 points):** used for BdG diagonalization, observable computation, free energy, and gap equations. Composite 2D Simpson weights give O(h⁴) accuracy.
-- **χ₀ grid (even, nk points, endpoint=False):** used exclusively for the static spin susceptibility χ₀(q_AFM). The even grid guarantees that adding q_AFM = (π, π) to any grid point maps exactly to another grid point via the precomputed index `chi0_Q_idx[i]`, avoiding interpolation and aliasing errors.
+- **χ₀ grid (even, nk points, endpoint=False):** used exclusively for χ₀(q_AFM) and the pairing kernel, exploiting the permutation trick above.
 
 ### Anderson Mixing for Self-Consistency
 
 The order parameters `[M, Q]` are updated via Anderson mixing (quasi-Newton without explicit Jacobian):
 
-1. Compute BdG observables (M_BdG, τ_x, Pair_s, Pair_d) at current parameters.
-2. Compute RPA factor from χ₀(q_AFM) (updated lazily when M or |Δ| change significantly).
-3. Solve dual-channel gap equations: `Δ_s_new = V_s · g_Δ · Σ_k w_k · F_AA(k)` and `Δ_d_new = V_d · g_Δ · Σ_k w_k · φ(k) · F_AB(k)`.
-4. Apply **Hellmann–Feynman Newton step** for M: `∂F/∂M = Σ_{k,n} f(E_n) ⟨ψ_n|∂H_BdG/∂M|ψ_n⟩` computed analytically; Newton step `M_newton = M − γ · ∂F/∂M` with Levenberg–Marquardt curvature `γ = 1/(|∂²F/∂M²| + μ_LM)`.
+1. Compute BdG eigensystem (shared cache); extract observables (M_BdG, τ_x, Pair_s, Pair_d).
+2. Update RPA factor from χ₀(q_AFM) (lazy: only when M or |Δ| change significantly).
+3. Solve dual-channel gap equations: `Δ_s_new = V_s · g_Delta_s · Σ_k w_k · F_AA(k)` and `Δ_d_new = V_d · g_Delta_d · Σ_k w_k · φ(k) · F_AB(k)`, with Newton–LM correction.
+4. Compute `∂F/∂M` and `∂²F/∂M²` analytically from the cached eigensystem (single diag, no finite diff).
 5. Blend Newton and BdG fixpoint: `M_out = (1−ALPHA_HF)·M_fixpoint + ALPHA_HF·M_newton`.
 6. Apply Anderson update to `[M, Q]`; blend with simple mixing for safeguarding.
 7. Reset Anderson history on Q sign flip (valley jump protection).
-8. Apply **Levenberg–Marquardt Newton step** for Δ channels independently.
+8. Q update: smooth BdG/cluster blend using `tanh`-weighting to avoid seed-noise dominance at small |Q_bdg|.
 
-After convergence, a **post-convergence Hessian test** is run: if all eigenvalues of the 3×3 `∂²F/∂{M,Q,Δ}²` matrix are positive, the solution is a true thermodynamic minimum; negative eigenvalues indicate a saddle point.
+After convergence, a **post-convergence Hessian test** checks that all eigenvalues of the 3×3 `∂²F/∂{M,Q,Δ}²` matrix are positive (true minimum vs. saddle point).
 
-### Brent Root-Finding for Chemical Potential
+### Two-Stage Bayesian Optimisation
 
-At each SCF iteration, μ is found by Brent's method on:
+The parameter search is factored into two stages to avoid the degeneracy `λ_eff ∝ V_scale × α_K × Δ_CF` that would make a joint 5D GP poorly conditioned:
 
+**Stage 1 — BayesianOptimizer (3D material space):**  
+Searches `(Δ_tetra, u, g_JT)` with `V_s_scale = V_d_scale = 1` fixed. For each material candidate, an **inner doping scan** runs `n_doping_scan` SCF calculations with warm-starting. Three sub-phases:
+- **LHS seeding** (`n_initial` materials): Latin Hypercube over the 3D space.
+- **Adaptive seeding** (`n_refine` materials): biased toward `lambda_JT ≈ 1` using the cheap `_cheap_scout` estimator (cluster ED + analytic χ₀, no full SCF).
+- **GP EI acquisition** (`n_iterations` materials): Matérn(ν=2.5) GP fitted on per-material best scores, Expected Improvement maximized.
+
+The objective score is physics-motivated:
 ```
-n(μ; M, Q, Δ_s, Δ_d) − n_target = 0
+score = Δ_total × conv_f × rpa_f × jt_f × stoner_f × lam_f
 ```
+where `jt_f` peaks at `lambda_JT ≈ 0.65` (SC-triggered regime) and penalizes both the closed-JT (`jt_f = 0.10`) and spontaneous-JT (`jt_f = 0.30`) regimes.
 
-with automatic bracket expansion up to ±6t₀ around the current guess.
+After Stage 1, the top-5 candidates are subjected to a **SC-triggered JT causality test**: a second SCF is run from `initial_Delta = 0` (normal-state fixpoint), and the JT is confirmed as SC-triggered if `Q(Δ=0) < 0.5 × Q(Δ>0)`.
+
+**Stage 2 — ChannelOptimizer (2D channel space):**  
+With the best material fixed, searches `(V_s_scale, V_d_scale)` via a `n_ch_grid × n_ch_grid` uniform grid followed by GP-EI refinement (~40 total SCF). Returns the globally optimal `(V_s*, V_d*)` and corresponding gap components.
 
 ---
 
@@ -321,7 +392,7 @@ with automatic bracket expansion up to ±6t₀ around the current guess.
 
 All energies in **eV**, lengths in **Å**.
 
-> **Parameter design:** `lambda_soc` (atomic SOC, eV) and `Delta_tetra` (tetragonal CF, eV) are primary inputs; `Delta_CF` is derived by exact diagonalization of the 6×6 SOC+CF Hamiltonian. **`Delta_tetra < 0` is required**: it encodes tetragonal compression (c < a, D₄h point group), which is the symmetry prerequisite for the AFM-forbidden/SC-allowed JT asymmetry. `lambda_hop` is an explicit primary input because its physical scale (~1–2 Å) is set by M–O bond geometry. `K_lattice` is derived from `lambda_jt` and `t0` as `K = g_JT²/(lambda_jt·t0)`.
+> **Parameter design:** `lambda_soc` and `Delta_tetra` are primary inputs; `Delta_CF` is derived by exact diagonalization of the 6×6 SOC+CF Hamiltonian. **`Delta_tetra < 0` is required** (tetragonal compression, D₄h). `alpha_K > 1.0` is enforced at construction — it sets `K_lattice = g_JT²/(alpha_K · Δ_CF)` and ensures the phonon is stable in the normal state. `V_s_scale` and `V_d_scale` are independent dimensionless scales for the two B₁g pairing channels; they replace the old `channel_mix` parameter.
 
 | Parameter | Symbol | Default | Description |
 |---|---|---|---|
@@ -329,27 +400,27 @@ All energies in **eV**, lengths in **Å**.
 | `u` | u | 4.821 | Dimensionless U/t₀ ratio; Hubbard U = u·t₀ |
 | `lambda_soc` | λ_SOC | 0.144 eV | Atomic SOC constant (t₂g shell) |
 | `Delta_tetra` | Δ_tet | −0.13 eV | Tetragonal CF (D₄h compression, **required < 0**) |
-| `Delta_inplane` | Δ_ip | 0.02 eV | B₂g in-plane anisotropy; splits Γ₇ quartet into Γ₇a+Γ₇b |
+| `Delta_inplane` | Δ_ip | 0.02 eV | B₂g in-plane anisotropy; splits Γ₇ quartet |
 | `Delta_CF` | Δ_CF | derived | Γ₆–Γ₇ splitting from SOC+CF diagonalization |
 | `U_mf` | U_mf | derived (0.5·Δ_CF) | Screened Stoner Weiss-field amplitude |
 | `g_JT` | g_JT | 0.774 eV/Å | Electron–phonon (JT) coupling |
-| `lambda_jt` | λ_JT | 0.417 | Dimensionless spring-constant ratio: K = g_JT²/(λ_JT·t₀); must satisfy λ_JT < Δ_CF/t₀ |
-| `K_lattice` | K | derived | Phonon spring constant (eV/Å²) |
-| `lambda_hop` | λ_hop | 1.2 Å | Hopping decay length for B₁g anisotropy: t(Q) = t₀·exp(±Q/λ_hop) |
+| `alpha_K` | α_K | 1.35 | Spring-constant stability margin: K = g_JT²/(α_K·Δ_CF); **must be > 1.0** |
+| `K_lattice` | K | derived | Phonon spring constant g_JT²/(α_K·Δ_CF) (eV/Å²) |
+| `lambda_hop` | λ_hop | 1.2 Å | Hopping decay length: t(Q) = t₀·exp(±Q/λ_hop) |
+| `V_s_scale` | — | 1.0 | Dimensionless strength of on-site Γ₆⊗Γ₇ channel; V_s = V_s_scale · g²/K |
+| `V_d_scale` | — | 1.0 | Dimensionless strength of inter-site d-wave channel; V_d = V_d_scale · g²/K |
 | `eta` | η | 0.09 | AFM asymmetry: Γ₇ feels η×M vs Γ₆ |
 | `doping_0` | δ₀ | 0.09 | Superexchange regularization floor |
-| `Delta_CT` | Δ_CT | 1.234 eV | Charge-transfer gap (ZSA scale); sets t_pd via t_pd² = t₀·Δ_CT |
-| `omega_JT` | ω_JT | 0.060 eV | JT phonon frequency (40–80 meV physical range); enters only D_phonon = 2/ω_JT |
-| `rpa_cutoff` | — | 0.12 | Stoner denominator floor: rpa_factor = 1/max(sd, cutoff) |
-| `d_wave` | — | True | True → d-wave B₁g φ(k) = cos kx − cos ky; False → s-wave φ = 1 |
-| `channel_mix` | — | 0.5 | Pairing channel mixing: 0 = pure on-site B₁g, 1 = pure d-wave B₁g |
+| `Delta_CT` | Δ_CT | 1.234 eV | Charge-transfer gap (ZSA scale) |
+| `omega_JT` | ω_JT | 0.060 eV | JT phonon frequency (40–80 meV) |
+| `rpa_cutoff` | — | 0.12 | Stoner denominator floor |
 | `mu_LM` | — | 5.0 | LM regularisation floor for M Newton step |
 | `ALPHA_HF` | — | 0.16 | Blend weight: Newton vs BdG fixpoint for M update |
 | `CLUSTER_WEIGHT` | — | 0.35 | Weight of cluster ED magnetization in M blend |
 | `ALPHA_D` | — | 0.3 | Blend weight: Newton vs gap-equation fixpoint for Δ update |
 | `mu_LM_D` | — | 1.0 | LM regularisation floor for Δ Newton step |
 | `Z` | Z | 4 | Coordination number (2D square lattice) |
-| `nk` | — | 80 | k-points per direction (even; Simpson grid uses nk+1) |
+| `nk` | — | 80 | k-points per direction |
 | `kT` | kT | 0.011 eV | Temperature (~127.7 K) |
 | `a` | a | 1.0 Å | Lattice constant |
 | `max_iter` | — | 200 | Maximum SCF iterations |
@@ -358,7 +429,7 @@ All energies in **eV**, lengths in **Å**.
 
 ### Analytically Derived Parameter Constraints for SC+JT Coexistence
 
-Three independent conditions must hold simultaneously. Violating any one of them closes the SC+JT window.
+Three independent conditions must hold simultaneously:
 
 **1. Metallicity** — the AFM gap must not swallow the Fermi surface:
 ```
@@ -367,17 +438,17 @@ h_AFM  =  g_J · f(δ) · (U_mf/2 + Z·2t²/U) · M/2  <  2·g_t·t₀
 
 **2. Pairing scale** — the SC gap must exceed the thermal energy:
 ```
-V_eff · g_Δ  =  (g_JT² / K) · g_Δ  =  λ_JT · t₀ · g_Δ  >>  kT
+V_s · g_Delta_s  >>  kT     and     V_d · g_Delta_d  >>  kT
 ```
 
-**3. SC–JT coupling** — SC condensate must drive Γ₆–Γ₇ mixing against the crystal-field gap:
+**3. JT stability** — phonon must not go soft spontaneously before SC onset:
 ```
-V_eff  =  g_JT² / K  >  0.1 · Δ_CF
+K > K_spont = g_JT² / Δ_CF    ↔    alpha_K > 1.0
 ```
 
-**4. JT stability** — the phonon must not go soft spontaneously before SC onset:
+**4. SC–JT coupling** — the JT feedback must sit in the SC-triggered regime:
 ```
-K  >  K_min = g_JT² / Δ_CF     equivalently:    λ_JT  <  Δ_CF / t₀
+0.05  <  lambda_JT = (g_JT² / K) · chi_tau  <  1.0
 ```
 
 All constraints are printed and checked by `params.summary()` at runtime.
@@ -392,11 +463,12 @@ All constraints are printed and checked by `params.summary()` at runtime.
 numpy
 scipy
 matplotlib
+scikit-learn   # optional — required for Bayesian optimisation (GP surrogate)
 ```
 
 Install with:
 ```bash
-pip install numpy scipy matplotlib
+pip install numpy scipy matplotlib scikit-learn
 ```
 
 ### Running the Simulation
@@ -409,12 +481,12 @@ On startup, the code:
 
 1. Constructs and diagonalizes the SOC+CF Hamiltonian to derive Δ_CF and related quantities.
 2. Calls `params.summary()` to print all derived parameters and check coexistence conditions.
-3. Initializes the RMFT_Solver with dual k-grids, Simpson weights, irrep projectors, and phonon propagator.
+3. Initializes `RMFT_Solver` with dual k-grids, Simpson weights, irrep projectors, and `VectorizedBdG`.
 4. Runs `plot_phase_diagrams()` which:
    - Scans the specified doping range with warm-starting,
-   - performs a crystal-field sweet-spot search at the midpoint doping,
-   - produces a 3×3 figure panel (phase diagram, CF scan, DOS, convergence histories, free energy, Gutzwiller factors, density constraint).
-5. Displays all figures via `plt.show()`.
+   - performs a crystal-field sweet-spot search (scanning via `Delta_tetra` → `Delta_CF` mapping),
+   - produces a 3×3 (or 4×3 with BO summary) figure panel.
+5. If `full_bayesian_optimize()` was called, a 4th row of BO diagnostic panels is embedded in the figure.
 
 ---
 
@@ -424,9 +496,9 @@ On startup, the code:
 
 | Position | Content |
 |---|---|
-| [0,0] | Phase diagram: M, Q, Δ_d vs. doping δ with phase-region shading |
-| [0,1] | Crystal-field sweet-spot: Δ_d, Q, M vs. Δ_CF at fixed doping (twin-axis) |
-| [0,2] | Density of States (DOS) with van Hove singularity detection |
+| [0,0] | Phase diagram: M, Q, Δ_s, Δ_d, \|Δ\| vs. doping δ with phase-region shading |
+| [0,1] | Crystal-field sweet-spot: Δ_d, Q, M vs. actual Δ_CF (derived from Δ_tetra scan, twin-axis) |
+| [0,2] | Density of States (DOS) via vectorized BdG; van Hove singularity detection |
 | [1,0] | SCF convergence of M — one coloured line per doping point |
 | [1,1] | SCF convergence of Q — one coloured line per doping point |
 | [1,2] | SCF convergence of \|Δ\| — one coloured line per doping point |
@@ -434,13 +506,21 @@ On startup, the code:
 | [2,1] | Gutzwiller factors g_t, g_J vs. iteration (last doping point) |
 | [2,2] | Electron density n vs. iteration with target line (last doping point) |
 
+If Bayesian optimisation results are provided, a 4th row is added:
+
+| Position | Content |
+|---|---|
+| [3,0] | BO progress: Δ and score vs. evaluation index; running best; colour by lambda_JT regime |
+| [3,1] | Doping δ vs. score scatter (green=SC-triggered JT, red=spontaneous risk, orange=closed) |
+| [3,2] | Δ_tetra vs. score scatter |
+
 ### Iteration Log
 
-Each iteration prints: M, Q, Δ_s, Δ_d, density n, chemical potential μ, free energy F, χ₀(q_AFM), RPA factor, multipolar susceptibility χ_τx, and JT algebraic status (✓/✗).
+Each iteration prints (via real-time progress bar + periodic line): M, Q, Δ_s, Δ_d, density n, chemical potential μ, free energy F, χ₀(q_AFM), RPA factor, multipolar susceptibility χ_τx, and JT algebraic status.
 
 ### Convergence Report
 
-At convergence, the solver prints: all converged order parameters, Hessian eigenvalues, irrep selection ratio R, and whether the fixpoint is a true minimum or a saddle point.
+At convergence: all converged order parameters, Hessian eigenvalues, irrep selection ratio R, and whether the fixpoint is a true minimum or a saddle point.
 
 ---
 
@@ -453,6 +533,7 @@ At convergence, the solver prints: all converged order parameters, Hessian eigen
 | Static phonon (Q is a mean field) | Adiabatic limit ω_JT ≪ electronic scale | Zero-point quantum lattice fluctuations neglected |
 | No spatial fluctuations | Mean-field in space | Cannot describe pseudogap, stripes, or phase separation |
 | RPA static (ω = 0) only | Valid near AFM QCP, not deep in ordered phase | Dynamical vertex corrections neglected |
+| V_s, V_d assumed uniform over BZ | Mean-field pairing | Momentum-dependent vertex corrections neglected |
 
 ---
 
@@ -463,10 +544,12 @@ The model implements the theoretical framework described in:
 - Ecsenyi, S. (2026). *Multipolar superconductivity and coherent orbital mixing* (preprint).
 - Anderson mixing: Pulay, P. (1980). *Chem. Phys. Lett.* 73, 393.
 - Gutzwiller renormalization: Zhang et al. (1988). *Supercond. Sci. Technol.* 1, 36.
+- Multi-orbital Gutzwiller: Bünemann, J., Weber, W. & Gebhard, F. (1998). *Phys. Rev. B* 57, 6896.
 - ZSA classification: Zaanen, Sawatzky & Allen (1985). *Phys. Rev. Lett.* 55, 418.
 - BdG formalism: de Gennes, P.G. (1966). *Superconductivity of Metals and Alloys.*
 - Jahn–Teller effect: Bersuker, I.B. (2006). *The Jahn–Teller Effect.* Cambridge.
 - RPA spin fluctuations: Scalapino, D.J. (1995). *Phys. Rep.* 250, 329.
+- Bayesian optimisation / GP: Snoek, J., Larochelle, H. & Adams, R.P. (2012). *NeurIPS.*
 
 ---
 

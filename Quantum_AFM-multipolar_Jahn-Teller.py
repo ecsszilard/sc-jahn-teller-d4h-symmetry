@@ -7,8 +7,9 @@ from dataclasses import dataclass
 from typing import Tuple, Dict, List, Optional
 import warnings
 import copy
-import time
+import time as _time
 import concurrent.futures
+import sys
 
 try:
     from sklearn.gaussian_process import GaussianProcessRegressor
@@ -45,7 +46,6 @@ class ModelParams:
     g_JT:          float      # eV/Å  Jahn–Teller electron–phonon coupling
     alpha_K:       float      # —     spring stiffness ratio; K = g²/(alpha_K·Δ_CF)
                               #       alpha_K > 1 → SC-triggered JT; alpha_K = 1 → marginal boundary
-                              #       Physical range 1.05–3.0. Replaces old λ_JT = g²/(K·t0)
     lambda_hop:    float      # Å     hopping decay length for B₁g anisotropy: t(Q) = t0·exp(±Q/λ_hop)
     eta:           float      # —     Γ₇ AFM asymmetry relative to Γ₆
     doping_0:      float      # —     superexchange regularisation (suppresses g_J→4 divergence near half-filling)
@@ -63,12 +63,26 @@ class ModelParams:
     # TIER 2 — BAYESIAN SEARCH VARIABLES (maximise Δ_total = Δ_s + Δ_d)
     # -----------------------------------------------------------------------
     # target_doping (δ) — doping/filling knob (range 0.08–0.30), passed as arg to solve_self_consistent
-    # alpha_K           — JT stability margin; alpha_K = 1 → marginal (spontaneous JT risk)
-    # channel_mix       — pairing amplitude split: V_s = (1−mix)·g²/K [orbital B₁g, φ=1]
-    #                     V_d = mix·g²/K [d-wave B₁g, φ(k)]; both in B₁g → no symmetry change
-    # NOTE: target_doping is NOT stored here; alpha_K and channel_mix ARE, mutated per trial.
+    #
+    # V_s_scale  — dimensionless scale for the on-site Γ₆⊗Γ₇ orbital singlet channel.
+    #              Physical V_s = V_s_scale · g²/K (eV).
+    #              Gutzwiller renormalization:
+    #                g_Delta_s = sqrt(g_{t,Γ6} · g_{t,Γ7})
+    #              where g_{t,Γ7} ≈ 1 because Δ_CF ≫ kT keeps Γ7 nearly empty.
+    #              → g_Delta_s ≈ sqrt(g_t)  (intermediate suppression; weaker than g_t).
+    #              Search range: [0.1, 2.5] (dimensionless).
+    #
+    # V_d_scale  — dimensionless scale for the inter-site d-wave B₁g channel.
+    #              Physical V_d = V_d_scale · g²/K (eV).
+    #              Gutzwiller renormalization: g_Delta_d = g_J = 4/(1+δ)² →
+    #              strongest at half-filling, vanishing at large doping.
+    #              Search range: [0.1, 2.5] (dimensionless).
+    #
+    # The two scales are INDEPENDENT: V_s + V_d is NOT constrained to a constant.
+    # NOTE: target_doping is NOT stored here; alpha_K, V_s_scale, V_d_scale ARE.
     # -----------------------------------------------------------------------
-    channel_mix:   float
+    V_s_scale:     float
+    V_d_scale:     float
 
     # -----------------------------------------------------------------------
     # TIER 3 — SCF NUMERICAL HYPER-PARAMETERS (tune once, do NOT Bayesian-optimise)
@@ -91,6 +105,10 @@ class ModelParams:
 
     def __post_init__(self):
         """Derive all secondary parameters from the primary inputs."""
+        if self.alpha_K <= 1.0:
+            raise ValueError(
+                f"alpha_K={self.alpha_K:.6f} must be strictly > 1.0 to prevent "
+            )
         # Γ₆–Γ₇a splitting from SOC+D4h CF. Pure cubic (Δ_tet=Δ_ip=0) → Δ_CF ≈ (3/2)·λ_SOC.
         # Delta_axial tunes Γ₆–Γ₇ gap; Delta_inplane splits Γ₇ quartet into Γ₇a+Γ₇b.
         self.Delta_CF: float = _gamma_splitting(
@@ -103,7 +121,7 @@ class ModelParams:
         # Gutzwiller-projected band model, NOT the bare charge-transfer U ~1–3 eV)
         self.U_mf: float = 0.5 * self.Delta_CF
 
-        # K = g²/(alpha_K·Δ_CF); alpha_K > 1 → K > K_min → spontaneous JT blocked
+        # K = g²/(alpha_K·Δ_CF); alpha_K > 1 → K < K_spont = g²/Δ_CF → spontaneous JT blocked
         self.K_lattice: float = self.g_JT**2 / (self.alpha_K * max(self.Delta_CF, 1e-6))
 
         # omega_JT is direct (40–80 meV); enters only D_phonon = 2/ω (shape of V(k,k')).
@@ -139,8 +157,11 @@ class ModelParams:
         # ==========================================================
         # 2) Pairing interaction scales
         # ==========================================================
-        V_eff = self.g_JT**2 / self.K_lattice     # bare JT-mediated pairing
-        V_eff_g = V_eff * g_t                    # bandwidth-renormalized
+        V_base  = self.g_JT**2 / self.K_lattice   # bare g²/K scale
+        V_eff   = V_base   # kept for diagnostics (total scale)
+        V_eff_s = self.V_s_scale * V_base         # on-site channel
+        V_eff_d = self.V_d_scale * V_base         # inter-site channel
+        V_eff_g = V_eff * g_t                    # legacy bandwidth-renormalized
 
         N0 = 1.0 / (np.pi * max(t_eff, 1e-6))     # 2D DOS estimate
         lambda_eff = V_eff * N0                  # BCS coupling constant
@@ -204,15 +225,17 @@ class ModelParams:
         print(f"  λ_eff (BCS coupling) = {lambda_eff:.3f}")
         print(f"    {'✓' if ok_pairing_min else '✗'} Minimal pairing: λ > 0.1")
         print(f"    {'✓' if ok_pairing_bcs else '✗'} BCS valid: λ < 1.5")
-        print(f"  V_eff (bare) = {V_eff:.4f} eV")
-        print(f"  V_eff·g_t (renorm) = {V_eff_g:.4f} eV")
-        print(f"  V_eff/Δ_CF = {mixing_pairing:.3f}  (fraction of CF splitting)")
+        print(f"  V_base (g²/K) = {V_eff:.4f} eV")
+        print(f"  V_s = V_s_scale·V_base = {V_eff_s:.4f} eV  (on-site Γ₆⊗Γ₇)")
+        print(f"  V_d = V_d_scale·V_base = {V_eff_d:.4f} eV  (inter-site d-wave)")
+        print(f"  V_eff·g_t (legacy display) = {V_eff_g:.4f} eV")
+        print(f"  V_base/Δ_CF = {mixing_pairing:.3f}  (fraction of CF splitting)")
 
-        K_min = self.g_JT**2 / max(self.Delta_CF, 1e-9)   # g²/Δ_CF; K > K_min ⟺ α_K > 1
-        print("\nJT mechanism:  K = g²/(α_K·Δ_CF) > K_min = g²/Δ_CF  ⟺  α_K > 1")
-        print(f"  α_K = {self.alpha_K:.4f}  →  K = {self.K_lattice:.4f} eV/Å²  "
-              f"(K_min = {K_min:.4f} eV/Å²,  margin = {self.alpha_K - 1:.4f})")
-        print(f"  {'✓ SC-TRIGGERED (K > K_min)' if jt_triggered else '✗ SPONTANEOUS JT RISK (K ≤ K_min)'}")
+        K_spont = self.g_JT**2 / max(self.Delta_CF, 1e-9)
+        print("\nJT mechanism:  α_K > 1  <=>  K = g²/(α_K*Δ_CF) < K_spont = g²/Δ_CF")
+        print(f"  α_K = {self.alpha_K:.4f}  ->  K = {self.K_lattice:.4f} eV/Å²  "
+              f"(K_spont(α_K=1) = {K_spont:.4f} eV/Å²,  margin α_K-1 = {self.alpha_K - 1:.4f})")
+        print(f"  {'✓ SC-TRIGGERED: α_K > 1, spontaneous JT blocked' if jt_triggered else '✗ SPONTANEOUS JT RISK: alpha_K <= 1'}")
 
         print("\nEstimated SC gap (linear, Q-driven):")
         print(f"  Δ_est = {Delta_est*1000:.2f} meV  @ Q={Q_est} Å")
@@ -287,10 +310,6 @@ def _gamma_splitting(lambda_soc: float, Delta_tetra: float,
 # =============================================================================
 # 1. SIMPSON INTEGRATION FOR K-SPACE
 # =============================================================================
-
-def _make_odd(n: int) -> int:
-    """Ensure n is odd for Simpson's rule"""
-    return n if n % 2 == 1 else n + 1
 
 def _simpson_weights_2d(nx: int, ny: int) -> np.ndarray:
     """
@@ -508,6 +527,9 @@ class RMFT_Solver:
         # VectorizedBdG (Section 6) is instantiated lazily on first use via
         # _get_vbdg().  Declared here so copy.copy() preserves the attribute.
         self._vbdg: Optional['VectorizedBdG'] = None
+        # Transient per-iteration BdG cache shared between observables / gap eq / dF/dM.
+        # Set at the top of each SCF iteration, cleared after compute_dF_dM_and_d2F.
+        self._scf_bdg_cache: Optional[tuple] = None
 
     # ------------------------------------------------------------------
     # Lazy VectorizedBdG accessor
@@ -522,26 +544,38 @@ class RMFT_Solver:
     # 3.1 GUTZWILLER RENORMALIZATION FACTORS
     # =========================================================================
     
-    def get_gutzwiller_factors(self, delta: float) -> Tuple[float, float, float]:
+    def get_gutzwiller_factors(self, delta: float) -> Tuple[float, float, float, float]:
         """
-        Gutzwiller renormalization factors for doping δ = 1 - n (hole or electron).
+        Gutzwiller renormalization factors for doping δ = 1 - n.
 
-        g_t  = 2δ/(1+δ)  — kinetic energy suppression; → 0 at half-filling (Mott insulator)
-        g_J  = 4/(1+δ)²  — exchange enhancement; → 4 at half-filling, gives J = 4t₀²/U
-        g_Δ  = 2δ/(1+δ)  — anomalous amplitude renormalization
+        g_t       = 2δ/(1+δ)  — kinetic energy; → 0 at half-filling (Mott insulator)
+        g_J       = 4/(1+δ)²  — exchange enhancement; → 4 at half-filling (J = 4t²/U)
+        g_Delta_s = sqrt(g_{t,Γ6} · g_{t,Γ7})  — on-site inter-orbital Γ₆⊗Γ₇ singlet.
+                                  Multi-orbital Gutzwiller: the anomalous amplitude of a
+                                  Cooper pair straddling two orbitals renormalizes as the
+                                  geometric mean of the two single-orbital factors.
+                                  g_{t,Γ6} = g_t = 2δ/(1+δ) (partially occupied band).
+                                  g_{t,Γ7} ≈ 1   because Δ_CF ≫ kT → Γ7 nearly empty,
+                                  so its Gutzwiller factor approaches the free-electron
+                                  limit (no double-occupancy cost in an empty orbital).
+                                  Therefore: g_Delta_s = sqrt(g_t · 1) = sqrt(g_t).
+                                  Intermediate suppression: g_t < g_Delta_s < 1.
+        g_Delta_d = g_J        — inter-site d-wave B₁g renormalization. Superexchange-
+                                  mediated: scales with the same vertex as J. Strongest
+                                  at half-filling, vanishing at large δ.
 
         Half-filling floor δ_min = 1e-6 to avoid singularity.
         """
-        abs_delta = max(abs(delta), 1e-6)
-        g_t     = (2.0 * abs_delta) / (1.0 + abs_delta)
-        g_J     = 4.0 / ((1.0 + abs_delta) ** 2)
-        g_Delta = g_t   # equal in single-band Gutzwiller; kept separate for potential multi-orbital extension
-        return g_t, g_J, g_Delta
-    
-    # =========================================================================
-    # 3.2 DISTORTION-DEPENDENT PARAMETERS
-    # =========================================================================
-    
+        abs_delta  = max(abs(delta), 1e-6)
+        g_t        = (2.0 * abs_delta) / (1.0 + abs_delta)
+        g_J        = 4.0 / ((1.0 + abs_delta) ** 2)
+        # g_Delta_s: multi-orbital Gutzwiller for Γ6⊗Γ7 on-site singlet.
+        # g_{t,Γ7} ≈ 1 (Γ7 nearly empty: Δ_CF ≫ kT), so:
+        # g_Delta_s = sqrt(g_{t,Γ6} · g_{t,Γ7}) = sqrt(g_t · 1) = sqrt(g_t)
+        g_Delta_s  = np.sqrt(g_t)  # intermediate: g_t < g_Delta_s < 1
+        g_Delta_d  = g_J           # superexchange vertex: same renormalization as J
+        return g_t, g_J, g_Delta_s, g_Delta_d
+
     def effective_hopping_anisotropic(self, Q: float) -> Tuple[float, float]:
         """
         B₁g JT distortion breaks x-y symmetry: tx ≠ ty
@@ -567,10 +601,6 @@ class RMFT_Solver:
         t_sq_avg = 0.5 * (tx_bare**2 + ty_bare**2)
         return g_J * 4.0 * t_sq_avg / self.p.U * f_doping
     
-    def dispersion(self, k: np.ndarray, tx: float, ty: float) -> float:
-        """γ(k) = -2[tx·cos(kx·a) + ty·cos(ky·a)]. B₁g anisotropy: tx ≠ ty when Q ≠ 0."""
-        return -2.0 * (tx * np.cos(k[0] * self.p.a) + ty * np.cos(k[1] * self.p.a))
-    
     def fermi_function(self, E: np.ndarray) -> np.ndarray:
         """The Fermi–Dirac distribution f(E) with μ is already included in the Hamiltonian; clipped to [-100, 100] to prevent overflow."""
         arg = E / self.p.kT
@@ -578,7 +608,7 @@ class RMFT_Solver:
         return 1.0 / (1.0 + np.exp(arg))
     
     # =========================================================================
-    # 3.2b  IRREP PROJECTION & MULTIPOLAR ALGEBRA  (symmetry selection rules)
+    # 3.2  IRREP PROJECTION & MULTIPOLAR ALGEBRA  (symmetry selection rules)
     # =========================================================================
 
     def build_irrep_selection_projector(self, Delta: complex) -> np.ndarray:
@@ -644,44 +674,40 @@ class RMFT_Solver:
               'chi_tau'     : float, multipolar susceptibility χ_τx ~ N(0)/(1 + α·M²). Non-zero only when U/t < (U/t)_c ≈ 2.2–2.5 (2D square lattice).
                               Physically: M² < 1 − (U/t)_c/(U/t) required for JT activation. If chi_tau ≈ 0, the JT channel is suppressed by AFM order.
         """
-        # Spin operator in 4-orbital BdG Nambu basis:
+        # Spin operator in 4-orbital BdG Nambu basis (diagonal):
         # Particle A: S_z = diag(+1,-1,+η,-η); B: staggered -1; holes: p-h conjugate signs.
         sz_orb   = np.array([1.0, -1.0, self.p.eta, -self.p.eta])
-        Sz_bdg   = np.zeros((16, 16))
-        Sz_bdg[np.arange(4),  np.arange(4)]  =  sz_orb   # particle A
-        Sz_bdg[np.arange(4)+4,np.arange(4)+4]= -sz_orb   # particle B (staggered)
-        Sz_bdg[np.arange(4)+8, np.arange(4)+8] = -sz_orb # hole A (p-h conjugate)
-        Sz_bdg[np.arange(4)+12,np.arange(4)+12]=  sz_orb # hole B
+        sz_diag  = np.concatenate([ sz_orb,   # particle A
+                                    -sz_orb,   # particle B (staggered)
+                                    -sz_orb,   # hole A (p-h conjugate)
+                                     sz_orb])  # hole B
 
-        # Batch-diagonalise the even k-grid for both k and k+Q_AFM
-        N   = self.N_k_even
-        H_stack_k  = np.zeros((N, 16, 16), dtype=complex)
-        H_stack_kQ = np.zeros((N, 16, 16), dtype=complex)
-        for i in range(N):
-            kvec  = self.k_points_even[i]
-            kQvec = self.k_points_even[self.chi0_Q_idx[i]]
-            H_stack_k[i]  = self.build_bdg_matrix(kvec,  M, Q, Delta_s, Delta_d, target_doping, mu, tx, ty, g_J)
-            H_stack_kQ[i] = self.build_bdg_matrix(kQvec, M, Q, Delta_s, Delta_d, target_doping, mu, tx, ty, g_J)
+        # Vectorised: diagonalise the even grid ONCE, then reindex for k+Q.
+        # chi0_Q_idx is a permutation of [0..N_even) so E(k+Q) and V(k+Q) are
+        # simply row-permutations of E(k) and V(k) — no second LAPACK call needed.
+        vbdg = self._get_vbdg()
+        E_k_all, V_k_all = vbdg.diag_kpts(self.k_points_even, M, Q, Delta_s, Delta_d,
+                                            target_doping, mu, tx, ty, g_J)  # (N,16), (N,16,16)
 
-        # Batched diagonalisation: (N, 16), (N, 16, 16)
-        E_k_all,  V_k_all  = np.linalg.eigh(H_stack_k)
-        E_kQ_all, V_kQ_all = np.linalg.eigh(H_stack_kQ)
+        E_kQ_all = E_k_all[self.chi0_Q_idx]   # (N,16)  — free permutation, no LAPACK
+        V_kQ_all = V_k_all[self.chi0_Q_idx]   # (N,16,16)
 
         f_k_all  = self.fermi_function(E_k_all)    # (N, 16)
         f_kQ_all = self.fermi_function(E_kQ_all)   # (N, 16)
 
         # Vectorised chi0: M_mat[k,n,m] = ⟨ψ_n(k)|Sz|ψ_m(k+Q)⟩
-        SzV_kQ = np.einsum('ij,kjm->kim', Sz_bdg, V_kQ_all)   # (N,16,16)
-        M_mat  = np.einsum('kni,kim->knm', V_k_all.conj(), SzV_kQ)  # (N,16,16)
-        M2     = np.abs(M_mat)**2  # (N,16,16)
+        # sz_diag is the diagonal of Sz_bdg → no matmul needed.
+        SzV_kQ  = sz_diag[None, :, None] * V_kQ_all           # (N,16,16)
+        M_mat   = np.einsum('kni,kim->knm', V_k_all.conj(), SzV_kQ)  # (N,16,16)
+        M2      = np.abs(M_mat)**2  # (N,16,16)
 
         df = f_k_all[:, :, None] - f_kQ_all[:, None, :]   # (N,16,16)
         dE = E_kQ_all[:, None, :] - E_k_all[:, :, None]   # (N,16,16)
 
-        # Mask degenerate/near-zero pairs; divide only where safe to avoid NaN/Inf
-        mask = (np.abs(df) > 1e-12) & (np.abs(dE) > 1e-6)
-        ratio = np.zeros_like(df)
-        ratio[mask] = (self.k_weights_even[:, None, None] * M2 * df / np.where(mask, dE, 1.0))[mask]
+        # Mask degenerate/near-zero pairs; safe division via np.where avoids NaN
+        mask    = (np.abs(df) > 1e-12) & (np.abs(dE) > 1e-6)
+        safe_dE = np.where(mask, dE, 1.0)
+        ratio   = np.where(mask, self.k_weights_even[:, None, None] * M2 * df / safe_dE, 0.0)
         chi0 = float(ratio.sum())
 
         # U_eff_chi = g_J·J_eff (Gutzwiller-renormalised exchange, not bare U) → U_eff_chi·chi0 ~ O(1)
@@ -728,7 +754,6 @@ class RMFT_Solver:
             return 1.0  # AFM instability: suppress enhancement
         return 1.0 / max(sd, self.p.rpa_cutoff)
 
-
     # =========================================================================
     # 3.2b  ORBITAL χ₀ TENSOR, RPA VERTEX, LINEARISED GAP EQUATION
     # =========================================================================
@@ -768,12 +793,13 @@ class RMFT_Solver:
                              Delta_s: complex, Delta_d: complex,
                              target_doping: float,
                              mu: float, tx: float, ty: float,
-                             g_J: float) -> np.ndarray:
+                             g_J: float,
+                             _E_k_cache: tuple = None) -> np.ndarray:
         """
-        Orbital bare susceptibility tensor χ₀^{ab}(q) in [6↑,6↓,7↑,7↓] basis.
+        Orbital bare susceptibility tensor chi0^{ab}(q) in [6↑,6↓,7↑,7↓] basis.
 
-        χ₀^{ab}(q) = −(1/N) Σ_{k,n,m} V*_{an}(k) V_{am}(k+q) V*_{bm}(k+q) V_{bn}(k)
-                       · (f_n(k) − f_m(k+q)) / (E_m(k+q) − E_n(k))
+        chi0^{ab}(q) = -(1/N) Σ_{k,n,m} V*_{an}(k) V_{am}(k+q) V*_{bm}(k+q) V_{bn}(k)
+                       · (f_n(k) - f_m(k+q)) / (E_m(k+q) - E_n(k))
 
         Sign convention: χ₀ > 0 for stable metal → RPA: χ_RPA = (I − U·χ₀)⁻¹·χ₀.
         Full BdG structure: particle/hole sectors for both sublattices A and B,
@@ -805,32 +831,31 @@ class RMFT_Solver:
             (SECTORS[3], SECTORS[2]),
         ]
 
-        # ── Batch-diagonalise the entire even k-grid ─────────────────────────
-        N = self.N_k_even
-        H_stack_k  = np.zeros((N, 16, 16), dtype=complex)
-        H_stack_kQ = np.zeros((N, 16, 16), dtype=complex)
-        for i in range(N):
-            kvec  = self.k_points_even[i]
-            kQvec = (kvec + q + np.pi) % (2 * np.pi) - np.pi
-            H_stack_k[i]  = self.build_bdg_matrix(kvec,  M, Q, Delta_s, Delta_d,
-                                                    target_doping, mu, tx, ty, g_J)
-            H_stack_kQ[i] = self.build_bdg_matrix(kQvec, M, Q, Delta_s, Delta_d,
-                                                    target_doping, mu, tx, ty, g_J)
+        vbdg   = self._get_vbdg()
+        kpts_k = self.k_points_even                                     # (N, 2)
 
-        E_k_all,  V_k_all  = np.linalg.eigh(H_stack_k)    # (N,16), (N,16,16)
-        E_kQ_all, V_kQ_all = np.linalg.eigh(H_stack_kQ)
+        # k-grid diagonalisation: reuse cache when available (q-independent)
+        if _E_k_cache is not None:
+            E_k_all, V_k_all = _E_k_cache
+        else:
+            E_k_all, V_k_all = vbdg.diag_kpts(kpts_k, M, Q, Delta_s, Delta_d,
+                                                target_doping, mu, tx, ty, g_J)
 
-        f_k_all  = self.fermi_function(E_k_all)     # (N,16)
+        # k+q grid (q-dependent: always recompute)
+        kpts_kq  = (kpts_k + q[None, :] + np.pi) % (2.0 * np.pi) - np.pi
+        E_kQ_all, V_kQ_all = vbdg.diag_kpts(kpts_kq, M, Q, Delta_s, Delta_d,
+                                              target_doping, mu, tx, ty, g_J)
+
+        f_k_all  = self.fermi_function(E_k_all)
         f_kQ_all = self.fermi_function(E_kQ_all)
 
-        # factor[k,n,m] = w[k] · (f_n - f_m) / (E_m - E_n), masked
-        df = f_k_all[:, :, None] - f_kQ_all[:, None, :]    # (N,16,16)
-        dE = E_kQ_all[:, None, :] - E_k_all[:, :, None]    # (N,16,16)
-        mask   = (np.abs(df) > 1e-12) & (np.abs(dE) > 1e-6)
-        factor = np.zeros_like(df)
-        factor[mask] = (self.k_weights_even[:, None, None] * df / np.where(mask, dE, 1.0))[mask]
+        df      = f_k_all[:, :, None] - f_kQ_all[:, None, :]
+        dE      = E_kQ_all[:, None, :] - E_k_all[:, :, None]
+        mask    = (np.abs(df) > 1e-12) & (np.abs(dE) > 1e-6)
+        safe_dE = np.where(mask, dE, 1.0)
+        factor  = np.where(mask, self.k_weights_even[:, None, None] * df / safe_dE, 0.0)
 
-        # Sum over sector pairs. Chunked to keep peak memory below ~32 MB per pair.
+        N = len(kpts_k)
         CHUNK = 128
         for (sl_k, sgn_k), (sl_kQ, sgn_kQ) in SECTOR_PAIRS:
             Vk_s  = V_k_all[:,  sl_k,  :]   # (N, 4, 16)
@@ -846,100 +871,6 @@ class RMFT_Solver:
                 FR = np.einsum('cnm,cabm->cabn', fac_c, R)                # (C,4,4,16)
                 chi0 += net_sgn * np.einsum('cabn,cabn->ab', L, FR)
         return chi0
-
-    def compute_rpa_susceptibility(self, q: np.ndarray,
-                                    M: float, Q: float,
-                                    Delta_s: complex, Delta_d: complex,
-                                    target_doping: float,
-                                    mu: float, tx: float, ty: float,
-                                    g_J: float) -> np.ndarray:
-        """
-        RPA susceptibility tensor χ_RPA^{ab}(q) = [I − U·χ₀(q)]⁻¹ · χ₀(q).
-
-        Uses the matrix-valued interaction U_mat (4×4) and bare susceptibility
-        χ₀^{ab}(q) (4×4) from compute_chi0_tensor.
-
-        Near the Stoner instability (det[I − U·χ₀] → 0) the denominator is
-        regularised by clamping eigenvalues of [I − U·χ₀] to rpa_cutoff from below.
-
-        Returns
-        -------
-        chi_rpa : (4, 4) complex matrix  (eV⁻¹)
-        """
-        chi0_mat = self.compute_chi0_tensor(q, M, Q, Delta_s, Delta_d,
-                                             target_doping, mu, tx, ty, g_J)
-        _, U_mat = self._u_eff_and_interaction_matrix(Q, g_J, target_doping)
-        I4       = np.eye(4, dtype=complex)
-        denom    = I4 - U_mat @ chi0_mat
-
-        # Regularise: clamp smallest singular value to rpa_cutoff
-        U_d, s_d, Vh_d = np.linalg.svd(denom)
-        s_reg = np.maximum(s_d, self.p.rpa_cutoff)
-        denom_reg_inv = (Vh_d.conj().T * (1.0 / s_reg)) @ U_d.conj().T
-        return denom_reg_inv @ chi0_mat
-
-    def project_to_pairing_channel(self, chi_rpa: np.ndarray) -> Tuple[float, float]:
-        """
-        Project χ_RPA onto the Γ₆⊗Γ₇ pairing channel and extract spin (s) and
-        charge (c) pairing vertices.
-
-        The SC-activated JT hypothesis requires pairing in the Γ₆⊗Γ₇ ⊃ B₁g
-        channel.  The relevant matrix elements of χ_RPA are those that connect
-        a Γ₆ state to a Γ₇ state (orbital off-diagonal):
-
-            V_pair^{s} = (3/2) U_eff² · Tr[P₆ · χ_RPA · P₇]   (spin channel)
-            V_pair^{c} = −(1/2) U_eff² · Tr[P₆ · χ_RPA · P₇]  (charge channel)
-
-        In the single-band approximation with U_mat = U_eff·I,
-        the spin vertex dominates:
-            V(q) = (3/2) Tr[P₆ · χ_RPA^s(q) · P₇] − (1/2) Tr[P₆ · χ_RPA^c(q) · P₇]
-
-        Since χ_RPA^c ≈ χ_RPA^s in the U_mat = U_eff·I limit:
-            V(q) ≈ Tr[P₆ · χ_RPA(q) · P₇]
-
-        The P₆ and P₇ projectors are 4×4 diagonal matrices in [6↑,6↓,7↑,7↓]:
-            P₆ = diag(1,1,0,0)  P₇ = diag(0,0,1,1)
-
-        Returns
-        -------
-        V_spin   : float  spin pairing vertex (eV), positive = attractive
-        V_charge : float  charge pairing vertex (eV)
-        """
-        # Γ₆⊗Γ₇ projection: off-diagonal block [0:2, 2:4] of chi_rpa
-        block_67 = chi_rpa[0:2, 2:4]  # Γ₆ rows, Γ₇ cols
-        V_67     = float(np.real(np.trace(block_67)))
-
-        # Spin and charge decomposition (single-band limit):
-        V_spin   =  1.5 * V_67   # (3/2) factor from SU(2) spin algebra
-        V_charge = -0.5 * V_67   # (−1/2) factor
-        return V_spin, V_charge
-
-    def compute_pairing_vertex(self, q: np.ndarray,
-                                M: float, Q: float,
-                                Delta_s: complex, Delta_d: complex,
-                                target_doping: float,
-                                mu: float, tx: float, ty: float,
-                                g_J: float) -> float:
-        """
-        Total pairing vertex V(q) projected onto the Γ₆⊗Γ₇ channel.
-
-        V(q) = V_spin(q) + V_charge(q)
-             = (3/2 − 1/2) · Tr[P₆ · χ_RPA(q) · P₇]
-             = Tr[P₆ · χ_RPA(q) · P₇]
-
-        In the charge-transfer (ZSA) limit χ_c ≈ χ_s (both enter the RPA
-        through the same U_mat = U_eff·I), so the net coefficient is +1
-        (spin and charge contributions combine constructively in the singlet
-        B₁g channel).
-
-        Returns
-        -------
-        V_q : float  (eV)   Positive = attractive in the Γ₆⊗Γ₇ B₁g singlet channel.
-        """
-        chi_rpa = self.compute_rpa_susceptibility(q, M, Q, Delta_s, Delta_d,
-                                                   target_doping, mu, tx, ty, g_J)
-        V_spin, V_charge = self.project_to_pairing_channel(chi_rpa)
-        return V_spin + V_charge   # net B₁g singlet vertex
 
     def _get_fermi_surface_sample(self, M: float, Q: float,
                                    Delta_s: complex, Delta_d: complex,
@@ -959,26 +890,31 @@ class RMFT_Solver:
         fs_pts : (N, 2)  k-points on or near the Fermi surface
         vF     : (N,)    |v_F| proxy (eV); proportional to DOS weight
         """
-        fs_pts_list: list = []
-        vF_list:     list = []
+        # Vectorised: diagonalise all k at once, then filter near-FS points
+        vbdg   = self._get_vbdg()
+        ev_all, _ = vbdg.diag_all_k(M, Q, Delta_s, Delta_d,
+                                     target_doping, mu, tx, ty, g_J)  # (N_k, 16)
 
-        for kvec in self.k_points:
-            H  = self.build_bdg_matrix(kvec, M, Q, Delta_s, Delta_d,
-                                        target_doping, mu, tx, ty, g_J)
-            ev = eigh(H, eigvals_only=True)
-            if np.any(np.abs(ev) < 3.0 * self.p.kT):
-                pos_ev = ev[ev > 0]
-                vF     = float(pos_ev.min()) if len(pos_ev) > 0 else float(self.p.kT)
-                vF     = max(vF, 1e-4)
-                fs_pts_list.append(kvec.copy())
-                vF_list.append(vF)
+        # Near-FS mask: at least one quasiparticle band within 3kT of zero
+        near_fs = np.any(np.abs(ev_all) < 3.0 * self.p.kT, axis=1)  # (N_k,)
 
-        if len(fs_pts_list) == 0:
-            fs_pts_list = list(self.k_points[:n_fs])
-            vF_list     = [1.0] * len(fs_pts_list)
+        # Fermi velocity proxy: minimum positive eigenvalue per k
+        ev_pos = np.where(ev_all > 0, ev_all, np.inf)
+        vF_all = ev_pos.min(axis=1)
+        vF_all = np.where(np.isinf(vF_all), self.p.kT, vF_all)
+        vF_all = np.maximum(vF_all, 1e-4)
+        vF_all = np.where(near_fs, vF_all, np.nan)
 
-        fs_pts = np.array(fs_pts_list[:n_fs])
-        vF     = np.array(vF_list[:n_fs])
+        fs_idx = np.where(near_fs)[0]
+        if len(fs_idx) == 0:
+            fs_idx = np.arange(min(n_fs, self.N_k))
+            vF_arr = np.ones(len(fs_idx))
+        else:
+            fs_idx = fs_idx[:n_fs]
+            vF_arr = vF_all[fs_idx].astype(float)
+
+        fs_pts = self.k_points[fs_idx]
+        vF     = vF_arr
         return fs_pts, vF
 
     def build_gap_equation_kernel(self, fermi_pts: np.ndarray, vF: np.ndarray,
@@ -988,33 +924,89 @@ class RMFT_Solver:
                                   mu: float, tx: float, ty: float,
                                   g_J: float) -> np.ndarray:
         """
-        Pairing kernel Γ_{ij} for the linearised gap equation (DIAGNOSTIC only).
+        Pairing kernel Gamma_{ij} for the linearised gap equation (DIAGNOSTIC only).
 
-            Γ_{ij} = √v_F(i) · V(k_i − k_j) · √v_F(j)
+            Gamma_{ij} = sqrt(v_F(i)) * V(k_i - k_j) * sqrt(v_F(j))
 
-        where V(q) is the full Γ₆⊗Γ₇-projected RPA vertex from compute_pairing_vertex.
+        where V(q) is the full Gamma6 x Gamma7-projected RPA vertex.
+        The kernel is SYMMETRIC (Gamma = Gamma^T) by construction.
 
-        The kernel is SYMMETRIC (Γ = Γᵀ) by construction.
+        IMPORTANT: diagnostic only -- the SCF gap is from solve_gap_equation_k.
 
-        IMPORTANT: This kernel is used exclusively in solve_linearized_gap_equation
-        to compute λ_max as a DIAGNOSTIC.  The actual Δ in the SCF loop is
-        determined by solve_gap_equation_k (BdG fixpoint + Newton-LM), NOT by
-        this eigenvalue.  The two approaches answer different questions:
-          • solve_gap_equation_k → WHAT IS the gap (self-consistent value)
-          • solve_linearized_gap_equation → IS THERE an instability (λ_max > 1)
+        Vectorised implementation (replaces naive O(N^2) double loop)
+        --------------------------------------------------------------
+        Exploits three facts to reduce BdG diagonalisation count:
+
+        1. Symmetry: Gamma is real-symmetric -> compute only upper triangle,
+           N(N+1)/2 pairs instead of N^2.
+        2. q-deduplication: many (i,j) pairs share the same q = k_i - k_j
+           (mod 2pi).  V(q) is computed only for unique q-vectors.
+        3. U_mat precomputed once: the RPA denominator (I - U*chi0)^-1 uses
+           U_mat that depends only on (Q, g_J, doping), not on q.
+
 
         Returns
         -------
         Gamma : (N, N) real symmetric matrix
         """
-        N     = len(fermi_pts)
-        Gamma = np.zeros((N, N))
+        N    = len(fermi_pts)
+        svF  = np.sqrt(np.abs(vF))   # (N,) -- sqrt(v_F) weights
+
+        # Precompute U_mat once (independent of q)
+        _, U_mat = self._u_eff_and_interaction_matrix(Q, g_J, target_doping)
+        I4       = np.eye(4, dtype=complex)
+
+        # Build upper-triangle (i,j) list and corresponding q-vectors
+        ij_list = []
+        q_list  = []
         for i in range(N):
-            for j in range(N):
-                q          = fermi_pts[i] - fermi_pts[j]
-                V_q        = self.compute_pairing_vertex(q, M, Q, Delta_s, Delta_d,
-                                                         target_doping, mu, tx, ty, g_J)
-                Gamma[i,j] = np.sqrt(vF[i]) * V_q * np.sqrt(vF[j])
+            for j in range(i, N):
+                q_raw = fermi_pts[i] - fermi_pts[j]
+                q_w   = (q_raw + np.pi) % (2.0 * np.pi) - np.pi   # wrap to [-pi, pi)
+                ij_list.append((i, j))
+                q_list.append(q_w)
+
+        q_arr = np.array(q_list)     # (M, 2), M = N(N+1)/2
+
+        # Deduplicate q-vectors (round to 5 decimal places as hash key)
+        q_keys = [f"{r[0]:.5f},{r[1]:.5f}" for r in np.round(q_arr, 5)]
+        unique_keys, inv_idx = np.unique(q_keys, return_inverse=True)
+
+        # Representative q-vector for each unique key
+        unique_q_map = {}
+        for flat_idx, key in enumerate(q_keys):
+            if key not in unique_q_map:
+                unique_q_map[key] = q_arr[flat_idx]
+        unique_q_vecs = np.array([unique_q_map[k] for k in unique_keys])  # (U, 2)
+
+        # Diagonalise the k-grid ONCE (q-independent) and cache for all unique q.
+        # This eliminates one full BdG diag per unique-q call inside compute_chi0_tensor.
+        vbdg       = self._get_vbdg()
+        E_k_cache  = vbdg.diag_kpts(self.k_points_even, M, Q, Delta_s, Delta_d,
+                                     target_doping, mu, tx, ty, g_J)   # (N_even,16),(N_even,16,16)
+
+        # Compute V(q) for every unique q, reusing the k-grid cache.
+        V_unique = np.empty(len(unique_keys), dtype=float)
+        for u_idx, q_u in enumerate(unique_q_vecs):
+            chi0_mat = self.compute_chi0_tensor(
+                q_u, M, Q, Delta_s, Delta_d, target_doping, mu, tx, ty, g_J,
+                _E_k_cache=E_k_cache)
+            denom        = I4 - U_mat @ chi0_mat
+            Ud, sd, Vhd  = np.linalg.svd(denom)
+            sd_reg       = np.maximum(sd, self.p.rpa_cutoff)
+            denom_inv    = (Vhd.conj().T * (1.0 / sd_reg)) @ Ud.conj().T
+            chi_rpa      = denom_inv @ chi0_mat
+            # Gamma6 x Gamma7 projection: off-diagonal block [0:2, 2:4]
+            # V_spin + V_charge = 1.5*V_67 - 0.5*V_67 = V_67
+            V_unique[u_idx] = float(np.real(np.trace(chi_rpa[0:2, 2:4])))
+
+        # Reconstruct full symmetric kernel from upper triangle
+        Gamma = np.zeros((N, N))
+        for flat_idx, (i, j) in enumerate(ij_list):
+            val = svF[i] * V_unique[inv_idx[flat_idx]] * svF[j]
+            Gamma[i, j] = val
+            Gamma[j, i] = val
+
         return Gamma
 
     def solve_linearized_gap_equation(self,
@@ -1091,19 +1083,20 @@ class RMFT_Solver:
                               Delta_s: complex, Delta_d: complex,
                               target_doping: float,
                               mu: float, tx: float, ty: float,
-                              g_J: float, g_Delta: float,
-                              rpa_factor: float) -> Tuple[float, float]:
+                              g_J: float, g_Delta_s: float, g_Delta_d: float,
+                              rpa_factor: float,
+                              _bdg_cache: tuple = None) -> Tuple[float, float]:
         """
         Dual-channel B₁g gap equations, solved with a single BdG diagonalization per k.
 
         Channel s — on-site orbital singlet (Γ₆⊗Γ₇ → B₁g, φ=1):
           Δ_s_new = V_s · g_Δ · Σ_k w_k · F_AA(k)
-          V_s = (1−channel_mix) · g²/K · rpa_factor
+          V_s = V_s_scale · g²/K · rpa_factor,  g_Delta_s = sqrt(g_t) ∈ (g_t, 1)
           No φ weight: on-site pairing gives F_AA(k) φ-independent.
 
         Channel d — inter-site d-wave (φ(k) → B₁g in k-space, A↔B sublattice):
           Δ_d_new = V_d · g_Δ · Σ_k w_k · φ(k) · F_AB(k)
-          V_d = channel_mix · g²/K · rpa_factor
+          V_d = V_d_scale · g²/K · rpa_factor,  g_Delta_d = g_J = 4/(1+δ)²
           φ weight IS needed and correct (no double-counting):
             Since D_intersite ∝ φ(k) in BdG, F_AB(k) ~ φ(k)·Δ_d/E_k (one power of φ),
             so dot = Σ w·φ·F_AB ~ Σ w·φ²·Δ_d/E_k = ⟨φ²⟩·Δ_d/E.
@@ -1113,15 +1106,17 @@ class RMFT_Solver:
           is set by the spring constant K: V_eff = g²/K (adiabatic BCS, λ~0.3).
 
         F_AA and F_AB are different matrix elements of the same eigenvectors → no cross-terms.
-        The hypothesis requires B₁g symmetry, not necessarily d-wave: channel_mix=0 tests
-        the pure on-site orbital B₁g case which is equally valid under D₄h.
+
+        _bdg_cache : optional (ev, ec) from a prior diag_all_k (same params).
+                     Pass from the SCF loop to avoid a redundant diagonalisation.
 
         Returns: (Delta_s_new, Delta_d_new) — new scalar amplitudes for both channels.
         """
         # Fast path: batched diagonalisation over all k in one LAPACK call.
         # Falls back to the scalar k-loop below only if _vbdg is unavailable.
         return self._get_vbdg().compute_gap_eq_vectorized(
-            M, Q, Delta_s, Delta_d, target_doping, mu, tx, ty, g_J, g_Delta, rpa_factor)
+            M, Q, Delta_s, Delta_d, target_doping, mu, tx, ty, g_J, g_Delta_s, g_Delta_d, rpa_factor,
+            _bdg_cache=_bdg_cache)
 
     # =========================================================================
     # 3.3 BdG HAMILTONIAN CONSTRUCTION
@@ -1149,13 +1144,10 @@ class RMFT_Solver:
 
         Returns ⟨τ_x⟩_anom (diagnostic supplement; anomalous part of orbital coherence, exactly zero when Δ=0. SCF uses total ⟨τ_x⟩ from BdG).
         """
-        # Build all BdG matrices and batch-diagonalise
-        N = self.N_k
-        H_stack = np.zeros((N, 16, 16), dtype=complex)
-        for i, kvec in enumerate(self.k_points):
-            H_stack[i] = self.build_bdg_matrix(kvec, M, Q, Delta_s, Delta_d,
-                                                target_doping, mu, tx, ty, g_J)
-        ev_all, ec_all = np.linalg.eigh(H_stack)   # (N,16), (N,16,16)
+        # Vectorised: reuse diag_kpts on self.k_points
+        vbdg = self._get_vbdg()
+        ev_all, ec_all = vbdg.diag_all_k(M, Q, Delta_s, Delta_d,
+                                          target_doping, mu, tx, ty, g_J)
         f_n_all  = self.fermi_function(ev_all)       # (N,16)
         omf_all  = 1.0 - 2.0 * f_n_all              # (N,16)
 
@@ -1193,7 +1185,7 @@ class RMFT_Solver:
           1. Chemical potential −μ
           2. Crystal field splitting Δ_CF on Γ₇
           3. Stoner-Heisenberg Weiss field h_AFM (spin-diagonal, dipolar only)
-          4. JT distortion:  H_JT = g_JT · Q · τ_x
+          4. JT distortion:  H_JT = g_JT · Q · τ_x # g_JT is the bare Holstein coupling
 
         SC-activated JT causal chain: Δ≠0 → F(k)≠0 → ⟨τ_x⟩≠0 → Q≠0 → H_JT≠0.
         No explicit Σ_anom=f(Δ) off-diagonal term: adding one would restore
@@ -1279,119 +1271,7 @@ class RMFT_Solver:
         D[0, 3] = Delta    # 6↑ pairs with 7↓
         D[1, 2] = -Delta   # 6↓ pairs with 7↑ (opposite sign for antisymmetry)
         return D
-    
-    def build_inter_site_pairing_block(self, Delta: complex, k: np.ndarray) -> np.ndarray:
-        """
-        4×4 inter-site d-wave pairing matrix for A-particle ↔ B-hole channel.
 
-        Pairing: Δ·φ(k)·(c_{A,6↑}c_{B,7↓} − c_{A,6↓}c_{B,7↑}) + h.c.
-
-        The d-wave form factor φ(k) = cos kx − cos ky (B₁g irrep of D₄h) belongs here
-        because it modulates INTER-SITE pairing between A and B sublattices — the correct
-        physical picture for cuprate d-wave SC. On-site pairing cannot be d-wave.
-
-        The orbital structure (Γ₆⊗Γ₇ singlet) provides the SECOND B₁g factor:
-        under D₄h, Γ₆⊗Γ₇ ⊃ B₁g, and φ(k) is also B₁g → product is A₁g (trivial irrep
-        of the Cooper pair), which is the singlet ground state.
-
-        Returns 4×4 matrix D such that:
-          BdG[0:4, 12:16] += D   (A-particle ↔ B-hole)
-          BdG[4:8, 8:12]  += D   (B-particle ↔ A-hole, by sublattice symmetry)
-        """
-        phi_k = np.cos(k[0] * self.p.a) - np.cos(k[1] * self.p.a)
-        D_local = np.zeros((4, 4), dtype=complex)
-        D_local[0, 3] =  Delta * phi_k   # A:6↑ ↔ B:7↓
-        D_local[1, 2] = -Delta * phi_k   # A:6↓ ↔ B:7↑ (singlet antisymmetry)
-        return D_local
-
-    def build_bdg_matrix(self, k: np.ndarray, M: float, Q: float,
-                        Delta_s: complex, Delta_d: complex, target_doping: float,
-                        mu: float, tx: float, ty: float,
-                        g_J: float) -> np.ndarray:
-        """
-        16×16 BdG Hamiltonian with DUAL B₁g pairing channels.
-
-        Delta_s: on-site orbital B₁g singlet amplitude (Γ₆⊗Γ₇ → B₁g via orbital indices).
-                 Enters on-site blocks: BdG[0:4,8:12] and BdG[4:8,12:16].
-                 Gap-equation: Δ_s = V_s·g_Δ·Σ_k w_k·F_AA(k)  (no φ weight)
-        Delta_d: inter-site d-wave B₁g amplitude (φ(k)=cos kx−cos ky → B₁g in k-space).
-                 Enters cross-sublattice blocks: BdG[0:4,12:16] and BdG[4:8,8:12].
-                 Gap-equation: Δ_d = V_d·g_Δ·Σ_k w_k·φ(k)·F_AB(k)  (φ weight needed)
-
-        Both channels have B₁g symmetry; the hypothesis requires only B₁g, not d-wave.
-        channel_mix in ModelParams controls V_s/V_d split of total g²/K pairing strength.
-        F_AA and F_AB are distinct matrix elements → no double-counting in gap equations.
-
-        Basis: [Part_A(0:4), Part_B(4:8), Hole_A(8:12), Hole_B(12:16)], each [6↑,6↓,7↑,7↓].
-        tx, ty: anisotropic hopping from B₁g JT distortion (tx≠ty when Q≠0).
-        """
-        # --- 1. LOCAL BLOCKS ---
-        # On-site energy for sublattices from staggered AFM Weiss field: +M on A, −M on B.
-        # The orbital mixing (τ_x) enters ONLY through Q (JT distortion), which is
-        # itself driven by the anomalous Green function F(k) via the SCF loop.
-        # No explicit Sigma_anom here: the SC back-action is mediated by Q, not by
-        # a direct Δ→H_loc term (which would re-introduce spontaneous JT).
-        H_A = self.build_local_hamiltonian_for_bdg(sign_M=+1.0, M=M, Q=Q, mu=mu, g_J=g_J,
-                                                    target_doping=target_doping)
-        H_B = self.build_local_hamiltonian_for_bdg(sign_M=-1.0, M=M, Q=Q, mu=mu, g_J=g_J,
-                                                    target_doping=target_doping)
-
-        # --- 2. KINETIC BLOCKS ---
-        # Inter-sublattice hopping: γ(k)×I₄, tx≠ty allows B₁g symmetry breaking from JT.
-        T_AB = self.dispersion(k, tx, ty) * np.eye(4, dtype=complex)
-
-        # --- 3. DUAL B₁g PAIRING BLOCKS ---
-        # Channel s: on-site orbital B₁g singlet (Γ₆⊗Γ₇ → B₁g via orbital indices, φ=1).
-        #   The hypothesis does NOT require d-wave: on-site inter-orbital singlet is B₁g.
-        #   Enters same-sublattice blocks: [Part_A↔Hole_A] and [Part_B↔Hole_B].
-        D_onsite = self.build_pairing_block(Delta_s)      # 4×4, φ-independent
-
-        # Channel d: inter-site d-wave B₁g (φ(k)=cos kx−cos ky → B₁g in k-space).
-        #   Enters cross-sublattice blocks: [Part_A↔Hole_B] and [Part_B↔Hole_A].
-        D_intersite = self.build_inter_site_pairing_block(Delta_d, k)  # 4×4, φ(k)-weighted
-
-        # --- 4. ASSEMBLE 16×16 BdG MATRIX ---
-        # Nambu basis: [Part_A(0:4), Part_B(4:8), Hole_A(8:12), Hole_B(12:16)]
-        #
-        # ┌──────────────┬──────────────────────────────┐
-        # │  H_A   T_AB  │  D_s        D_d              │  Part_A, Part_B
-        # │  T_AB† H_B   │  D_d        D_s              │
-        # ├──────────────┼──────────────────────────────┤
-        # │  D_s†  D_d†  │  −H_A*     −T_AB†            │  Hole_A, Hole_B
-        # │  D_d†  D_s†  │  −T_AB*    −H_B*             │
-        # └──────────────┴──────────────────────────────┘
-        #
-        # F_AA = u_A·v_A* measures channel s;  F_AB = u_A·v_B* measures channel d.
-        # Gap eqs: Δ_s = V_s·Σ_k w_k·F_AA(k)  and  Δ_d = V_d·Σ_k w_k·φ(k)·F_AB(k).
-        # The two gap equations are decoupled in the pairing matrix elements → no double-counting.
-
-        BdG = np.zeros((16, 16), dtype=complex)
-
-        # Particle-Particle sector (upper-left 8×8)
-        BdG[0:4, 0:4] = H_A
-        BdG[4:8, 4:8] = H_B
-        BdG[0:4, 4:8] = T_AB
-        BdG[4:8, 0:4] = np.conj(T_AB).T
-
-        # Hole-Hole sector (lower-right 8×8): particle-hole symmetry −H*
-        BdG[8:12,  8:12]  = -np.conj(H_A)
-        BdG[12:16, 12:16] = -np.conj(H_B)
-        BdG[8:12,  12:16] = -np.conj(T_AB)
-        BdG[12:16,  8:12] = -np.conj(T_AB).T
-
-        # On-site pairing (channel s): same-sublattice particle-hole
-        BdG[0:4,   8:12] = D_onsite           # A-particle ↔ A-hole
-        BdG[4:8,  12:16] = D_onsite           # B-particle ↔ B-hole
-        BdG[8:12,   0:4] = np.conj(D_onsite).T
-        BdG[12:16,  4:8] = np.conj(D_onsite).T
-
-        # Inter-site pairing (channel d): cross-sublattice particle-hole
-        BdG[0:4,  12:16] = D_intersite        # A-particle ↔ B-hole
-        BdG[4:8,   8:12] = D_intersite        # B-particle ↔ A-hole
-        BdG[12:16,  0:4] = np.conj(D_intersite).T
-        BdG[8:12,   4:8] = np.conj(D_intersite).T
-        return BdG
-    
     # =========================================================================
     # 3.4 OBSERVABLES FROM BdG SPECTRUM (PRIMARY SOURCE)
     # =========================================================================
@@ -1436,67 +1316,111 @@ class RMFT_Solver:
         Compute total density for given mu and parameters.
         Used for chemical potential root-finding.
         """
-        n_total = 0.0
-        f = self.fermi_function
-        
-        for i, kvec in enumerate(self.k_points):
-            H = self.build_bdg_matrix(kvec, M, Q, Delta_s, Delta_d, target_doping, mu, tx, ty, g_J)
-            eigvals, eigvecs = eigh(H)
-            fn = f(eigvals)
-            fn_bar = 1.0 - fn
-            
-            dens_A, dens_B = 0.0, 0.0
-            for n in range(16):
-                psi = eigvecs[:, n]
-                u_A, u_B = psi[0:4], psi[4:8]
-                v_A, v_B = psi[8:12], psi[12:16]
-                
-                dens_A += np.sum(np.abs(u_A)**2) * fn[n] + np.sum(np.abs(v_A)**2) * fn_bar[n]
-                dens_B += np.sum(np.abs(u_B)**2) * fn[n] + np.sum(np.abs(v_B)**2) * fn_bar[n]
-            
-            n_avg = (dens_A + dens_B) / 2.0 / 2.0  # BdG doubling correction
-            n_total += self.k_weights[i] * n_avg
-        return n_total
+        # Vectorised over all k at once via VectorizedBdG (in-place buffer, no alloc)
+        vbdg = self._get_vbdg()
+        ev_all, ec_all = vbdg.diag_all_k(
+            M, Q, Delta_s, Delta_d, target_doping, mu, tx, ty, g_J)
+        # ev_all: (N_k, 16),  ec_all: (N_k, 16, 16)
+
+        fn     = self.fermi_function(ev_all)          # (N_k, 16)
+        fn_bar = 1.0 - fn
+
+        uA = ec_all[:, 0:4,   :]   # (N_k, 4, 16)
+        uB = ec_all[:, 4:8,   :]
+        vA = ec_all[:, 8:12,  :]
+        vB = ec_all[:, 12:16, :]
+
+        dens_A = np.sum(np.abs(uA)**2 * fn[:, None, :]
+                      + np.abs(vA)**2 * fn_bar[:, None, :], axis=(1, 2))  # (N_k,)
+        dens_B = np.sum(np.abs(uB)**2 * fn[:, None, :]
+                      + np.abs(vB)**2 * fn_bar[:, None, :], axis=(1, 2))
+
+        n_avg = (dens_A + dens_B) / 2.0 / 2.0   # BdG doubling correction
+        return float(np.dot(self.k_weights, n_avg))
     
     def _find_mu_for_density(self, M: float, Q: float, Delta_s: complex, Delta_d: complex, target_doping: float,
                              tx: float, ty: float, mu_guess: float, g_J: float) -> float:
         """
-        Find chemical potential that yields target_doping via root-finding.
-        Uses Brent's method for robustness.
+        Find chemical potential that yields target_doping via Newton's method.
+
+        The analytic derivative ∂n/∂μ = Σ_{k,n} w_k · (−∂f/∂E) · (|u_A|² + |u_B|² + |v_A|² + |v_B|²)
+        is computed from the same BdG eigensystem as n(μ), so each Newton step costs
+        one diagonalization instead of the ~15 brentq evaluations.
+        Falls back to brentq bracketing if Newton fails to converge.
         """
-        
+        target_n = 1.0 - target_doping
+
+        def density_and_deriv(mu_val: float):
+            """Return (n − target_n, ∂n/∂μ) from a single BdG diagonalization."""
+            vbdg = self._get_vbdg()
+            ev, ec = vbdg.diag_all_k(M, Q, Delta_s, Delta_d, target_doping,
+                                      mu_val, tx, ty, g_J)
+            f   = self.fermi_function(ev)          # (N_k, 16)
+            fb  = 1.0 - f
+
+            uA = ec[:, 0:4,   :]
+            uB = ec[:, 4:8,   :]
+            vA = ec[:, 8:12,  :]
+            vB = ec[:, 12:16, :]
+
+            dens_A = np.sum(np.abs(uA)**2 * f[:, None, :]
+                          + np.abs(vA)**2 * fb[:, None, :], axis=(1, 2))
+            dens_B = np.sum(np.abs(uB)**2 * f[:, None, :]
+                          + np.abs(vB)**2 * fb[:, None, :], axis=(1, 2))
+            n = float(np.dot(self.k_weights, dens_A + dens_B)) / 4.0
+
+            # ∂n/∂μ: −∂f/∂E = f(1−f)/kT ≥ 0; total weight per (k,n) is
+            # |u_A|²+|u_B|²+|v_A|²+|v_B|² = 1 (BdG normalization within each sublattice pair)
+            df_dE = f * fb / max(self.p.kT, 1e-10)   # (N_k,16), ≥ 0
+            # weight: same orbital sums as density
+            w_A = np.sum(np.abs(uA)**2 + np.abs(vA)**2, axis=1)   # (N_k,16)
+            w_B = np.sum(np.abs(uB)**2 + np.abs(vB)**2, axis=1)
+            dn_dmu = float(np.einsum('k,kn,kn->', self.k_weights, df_dE, w_A + w_B)) / 4.0
+            return n - target_n, dn_dmu
+
+        mu = mu_guess
+        for _ in range(20):   # Newton iterations (typically converges in 3-6)
+            err, deriv = density_and_deriv(mu)
+            if abs(err) < 1e-6:
+                return mu
+            if abs(deriv) < 1e-12:
+                break   # flat → fall through to brentq
+            # dn/dmu ≥ 0 always; abs() guards against rare numerical noise giving tiny negatives
+            step = err / max(abs(deriv), 1e-10)
+            # Limit step to bandwidth/4 to avoid overshooting
+            step = float(np.clip(step, -self.p.t0, self.p.t0))
+            mu -= step
+
+        # Fallback: brentq (rare — only if Newton diverges or lands on flat region)
         def density_error(mu_val):
-            n = self._compute_density_at_mu(mu_val, M, Q, Delta_s, Delta_d, target_doping, tx, ty, g_J)
-            return n - (1 - target_doping)
-        
-        # Bracket search: start around mu_guess
-        w = 6.0 * self.p.t0  # bandwidth estimate
-        mu_min, mu_max = mu_guess - w, mu_guess + w
-        
+            vbdg = self._get_vbdg()
+            ev, ec = vbdg.diag_all_k(M, Q, Delta_s, Delta_d, target_doping,
+                                      mu_val, tx, ty, g_J)
+            f  = self.fermi_function(ev)
+            fb = 1.0 - f
+            uA = ec[:, 0:4,  :];  vA = ec[:, 8:12, :]
+            uB = ec[:, 4:8,  :];  vB = ec[:, 12:16,:]
+            dA = np.sum(np.abs(uA)**2 * f[:,None,:] + np.abs(vA)**2 * fb[:,None,:], axis=(1,2))
+            dB = np.sum(np.abs(uB)**2 * f[:,None,:] + np.abs(vB)**2 * fb[:,None,:], axis=(1,2))
+            return float(np.dot(self.k_weights, dA + dB)) / 4.0 - target_n
+
+        w = 6.0 * self.p.t0
+        mu_min, mu_max = mu - w, mu + w
         try:
             err_min = density_error(mu_min)
             err_max = density_error(mu_max)
-            
-            # Expand bracket if needed
-            iter_expand = 0
-            while (err_min * err_max > 0) and iter_expand < 10:
-                if err_min > 0:  # Density too high everywhere, lower mu_min
-                    mu_min -= w
-                    err_min = density_error(mu_min)
-                else:  # Density too low everywhere, raise mu_max
-                    mu_max += w
-                    err_max = density_error(mu_max)
-                iter_expand += 1
-            
-            if err_min * err_max > 0:
-                # Failed to bracket, return guess
-                return mu_guess
-            
-            # Root-finding with Brent's method
-            mu_opt = brentq(density_error, mu_min, mu_max, xtol=1e-5)
-            return mu_opt
+            for _ in range(10):
+                if err_min * err_max <= 0:
+                    break
+                if err_min > 0:
+                    mu_min -= w;  err_min = density_error(mu_min)
+                else:
+                    mu_max += w;  err_max = density_error(mu_max)
+            if err_min * err_max <= 0:
+                return brentq(density_error, mu_min, mu_max, xtol=1e-5)
         except Exception:
-            return mu_guess
+            pass
+        return mu
     
     def compute_observables_from_bdg(self, eigvals: np.ndarray, eigvecs: np.ndarray) -> Dict:
         """
@@ -1569,42 +1493,45 @@ class RMFT_Solver:
     def compute_bdg_free_energy(self, M: float, Q: float,
                                 Delta_s: complex, Delta_d: complex, target_doping: float,
                                 mu: float, tx: float, ty: float, g_J: float,
-                                g_Delta: float = 1.0,
                                 rpa_factor: float = 1.0) -> float:
         """
         Grand potential per site from the k-space BdG spectrum:
 
-        Ω = (1/2) Σ_{k,n} w_k [E_n f_n − T S(f_n)] + |Δ|²/(g_Δ·V_eff) + (K/2)Q²
+        Ω = (1/2) Σ_{k,n} w_k [E_n f_n − T S(f_n)]
+              + |Δ_s|²/(g_Δs·V_s) + |Δ_d|²/(g_Δd·V_d) + (K/2)Q²
 
         The 1/2 accounts for the doubled unit cell.
-        |Δ|²/(g_Δ·V_eff): condensation cost (MF decoupling price; prevents Δ divergence).
+        Condensation cost per channel uses independent g_Delta_s/g_Delta_d
+        (derived internally from target_doping via get_gutzwiller_factors).
         (K/2)Q²: elastic energy; JT gain E_JT = g²/(2K) already in BdG spectrum.
         V_eff = g²/K (adiabatic BCS); RPA renormalizes the electronic gain, not V_eff.
         """
-        Omega_cell = 0.0
+        vbdg = self._get_vbdg()
+        ev_all, _ = vbdg.diag_all_k(M, Q, Delta_s, Delta_d, target_doping, mu, tx, ty, g_J)
+        f_n = self.fermi_function(ev_all)   # (N_k, 16)
 
-        for i, kvec in enumerate(self.k_points):
-            H_BdG = self.build_bdg_matrix(kvec, M, Q, Delta_s, Delta_d, target_doping, mu, tx, ty, g_J)
-            E_n = eigh(H_BdG, eigvals_only=True)
-            f_n = self.fermi_function(E_n)
-            
-            local_omega = 0.0
-            for n in range(16):
-                local_omega += E_n[n] * f_n[n]
-                if self.p.kT > 1e-8: # Entropy contribution (only at finite T)
-                    f = f_n[n]
-                    if 1e-10 < f < 1.0 - 1e-10:
-                        local_omega -= self.p.kT * (-f * np.log(f) - (1 - f) * np.log(1 - f))
+        Ef = np.einsum('k,kn,kn->', self.k_weights, ev_all, f_n)
 
-            Omega_cell += self.k_weights[i] * local_omega
+        if self.p.kT > 1e-8:
+            eps = 1e-12
+            f_c = np.clip(f_n, eps, 1.0 - eps)
+            S_kn = -(f_c * np.log(f_c) + (1.0 - f_c) * np.log(1.0 - f_c))
+            S_term = self.p.kT * np.einsum('k,kn->', self.k_weights, S_kn)
+        else:
+            S_term = 0.0
+
+        Omega_cell = Ef - S_term
 
         # V_eff = g²/K (adiabatic, BCS controlled λ~O(1)); g²/ω would give Eliashberg regime
-        V_total_rpa = (self.p.g_JT**2 / max(self.p.K_lattice, 1e-9)) * rpa_factor
-        V_s = (1.0 - self.p.channel_mix) * V_total_rpa
-        V_d = self.p.channel_mix          * V_total_rpa
-        # Condensation cost: |Δ|²/(g_Δ·V) for each channel (MF decoupling price)
-        cond_s = (abs(Delta_s)**2 / (g_Delta * V_s) if (V_s > 1e-12 and abs(Delta_s) > 1e-10) else 0.0)
-        cond_d = (abs(Delta_d)**2 / (g_Delta * V_d) if (V_d > 1e-12 and abs(Delta_d) > 1e-10) else 0.0)
+        _V_base_fe  = (self.p.g_JT**2 / max(self.p.K_lattice, 1e-9)) * rpa_factor
+        V_s = self.p.V_s_scale * _V_base_fe
+        V_d = self.p.V_d_scale * _V_base_fe
+        # Condensation cost: |Δ|²/(g_Δ·V) — per channel with independent Gutzwiller factors
+        # g_Delta_s = sqrt(g_t): multi-orbital geometric mean (Γ6 partially filled, Γ7 ≈ empty)
+        # g_Delta_d = g_J:       superexchange vertex, same renormalization as J
+        _, g_J_fe, g_Delta_s_fe, g_Delta_d_fe = self.get_gutzwiller_factors(target_doping)
+        cond_s = (abs(Delta_s)**2 / (g_Delta_s_fe * V_s) if (V_s > 1e-12 and abs(Delta_s) > 1e-10) else 0.0)
+        cond_d = (abs(Delta_d)**2 / (g_Delta_d_fe * V_d) if (V_d > 1e-12 and abs(Delta_d) > 1e-10) else 0.0)
         condensation_correction = cond_s + cond_d
         elastic_energy = 0.5 * self.p.K_lattice * Q**2  # JT gain already in BdG spectrum
 
@@ -1678,7 +1605,6 @@ class RMFT_Solver:
                             initial_M: float = 0.5,
                             initial_Q: float = 1e-4,
                             initial_Delta: float = 0.05,
-                            initial_channel_mix: float | None = None,
                             verbose: bool = True) -> Dict:
         """
         Variational SCF: minimizes F_total(M, Q, Δ, μ) subject to ⟨n⟩ = target_density.
@@ -1699,10 +1625,12 @@ class RMFT_Solver:
         """
         M = initial_M
         Q = initial_Q
-        # Split initial Delta between channels according to channel_mix
-        mix = self.p.channel_mix if initial_channel_mix is None else float(np.clip(initial_channel_mix, 0.0, 1.0))
-        Delta_s = float(initial_Delta) * (1.0 - mix) + 0.0j   # on-site orbital B₁g
-        Delta_d = float(initial_Delta) * mix           + 0.0j   # inter-site d-wave B₁g
+        # Split initial Delta between channels proportional to V_s_scale / V_d_scale
+        _V_ratio_total = max(self.p.V_s_scale + self.p.V_d_scale, 1e-9)
+        _frac_s = self.p.V_s_scale / _V_ratio_total
+        _frac_d = self.p.V_d_scale / _V_ratio_total
+        Delta_s = float(initial_Delta) * _frac_s + 0.0j   # on-site orbital B₁g
+        Delta_d = float(initial_Delta) * _frac_d + 0.0j   # inter-site d-wave B₁g
         
         # Initial mu estimatating based on 2D tight-binding
         if abs(target_doping) < 0.01:
@@ -1747,15 +1675,25 @@ class RMFT_Solver:
                       'jt_algebraically_allowed': False,
                       'tau_x_projected': 0.0, 'tau_x_free_max': 1.0}
 
+        _scf_t0 = _time.time()
+
         for iteration in range(self.p.max_iter):
 
             # --- Renormalized parameters (use OLD Q for this step) ---
-            g_t, g_J, g_Delta = self.get_gutzwiller_factors(target_doping)
+            g_t, g_J, g_Delta_s, g_Delta_d = self.get_gutzwiller_factors(target_doping)
             tx_bare, ty_bare = self.effective_hopping_anisotropic(Q)
             tx, ty = g_t * tx_bare, g_t * ty_bare
 
+            # --- Single BdG diagonalisation shared by observables, gap eq, and dF/dM ---
+            # Computing it once and caching avoids 3→1 LAPACK calls per iteration.
+            _bdg_ev, _bdg_ec = self._get_vbdg().diag_all_k(
+                M, Q, Delta_s, Delta_d, target_doping, mu, tx, ty, g_J)
+            self._scf_bdg_cache = (_bdg_ev, _bdg_ec)   # picked up by dF_dM_and_d2F
+
             # --- Compute observables with CURRENT mu ---
-            obs = self._compute_k_observables(M, Q, Delta_s, Delta_d, target_doping, mu, tx, ty, g_J)
+            obs = self._get_vbdg().compute_observables_vectorized(
+                M, Q, Delta_s, Delta_d, target_doping, mu, tx, ty, g_J,
+                _bdg_cache=(_bdg_ev, _bdg_ec))
             tau_x      = obs['Q']
             Pair_s_obs = obs['Pair_s']   # on-site pairing amplitude (channel s)
             Pair_d_obs = obs['Pair_d']   # inter-site pairing amplitude (channel d)
@@ -1784,22 +1722,23 @@ class RMFT_Solver:
                 _chi0_last_Delta = Delta_eff
                 chi_tau = chi0_result['chi_tau']
 
-            # --- Dual-channel gap equations: V_s=(1−mix)·g²/K·rpa, V_d=mix·g²/K·rpa ---
+            # --- Dual-channel gap equations: V_s=V_s_scale·g²/K·rpa, V_d=V_d_scale·g²/K·rpa ---
             Delta_s_out, Delta_d_out = self.solve_gap_equation_k(
-                M, Q, Delta_s, Delta_d, target_doping, mu, tx, ty, g_J, g_Delta, rpa_factor)
+                M, Q, Delta_s, Delta_d, target_doping, mu, tx, ty, g_J, g_Delta_s, g_Delta_d, rpa_factor,
+                _bdg_cache=(_bdg_ev, _bdg_ec))
 
             # --- Newton–LM for Δ: ∂F/∂Δ_c = Δ_c/(g_Δ·V_c) − F_c = 0, blended with fixpoint ---
-            V_total_n = (self.p.g_JT**2 / max(self.p.K_lattice, 1e-9)) * rpa_factor
-            V_s_n     = (1.0 - self.p.channel_mix) * V_total_n
-            V_d_n     = self.p.channel_mix           * V_total_n
+            _V_base   = (self.p.g_JT**2 / max(self.p.K_lattice, 1e-9)) * rpa_factor
+            V_s_n     = self.p.V_s_scale * _V_base
+            V_d_n     = self.p.V_d_scale * _V_base
             eps_D     = 1e-4
             mu_LM_D   = self.p.mu_LM_D
             ALPHA_D   = self.p.ALPHA_D
 
-            def _newton_delta(d_val, V_c, Pair_c):
+            def _newton_delta(d_val, V_c, g_Dc, Pair_c):
                 if V_c < 1e-12:
                     return 0.0
-                denom = max(V_c * g_Delta, 1e-12)
+                denom = max(V_c * g_Dc, 1e-12)
                 dF0  = d_val / denom - float(np.real(Pair_c))
                 dFp  = (d_val + eps_D) / denom - float(np.real(Pair_c))
                 dFm  = (d_val - eps_D) / denom - float(np.real(Pair_c))
@@ -1807,19 +1746,19 @@ class RMFT_Solver:
                 gamma = 1.0 / (abs(d2F) + mu_LM_D)
                 return d_val - gamma * dF0
 
-            Ds_newton = _newton_delta(abs(Delta_s), V_s_n, Pair_s_obs)
-            Dd_newton = _newton_delta(abs(Delta_d), V_d_n, Pair_d_obs)
+            Ds_newton = _newton_delta(abs(Delta_s), V_s_n, g_Delta_s, Pair_s_obs)
+            Dd_newton = _newton_delta(abs(Delta_d), V_d_n, g_Delta_d, Pair_d_obs)
             Delta_s_out = float(max((1.0 - ALPHA_D)*Delta_s_out + ALPHA_D*Ds_newton, 0.0))
             Delta_d_out = float(max((1.0 - ALPHA_D)*Delta_d_out + ALPHA_D*Dd_newton, 0.0))
 
             # --- Hellmann–Feynman Newton update for M ---
             # ∂F/∂M = 0 → Newton step γ = 1/|∂²F/∂M²|; gradient ∂F/∂M ~ O(10) eV
             # so plain gradient descent with fixed γ is ill-conditioned.
-            eps_hf    = 1e-3
-            dF_dM_0   = self.compute_dF_dM(M,          Q, Delta_s, Delta_d, target_doping, mu, tx, ty, g_J)
-            dF_dM_p   = self.compute_dF_dM(M + eps_hf, Q, Delta_s, Delta_d, target_doping, mu, tx, ty, g_J)
-            dF_dM_m   = self.compute_dF_dM(M - eps_hf, Q, Delta_s, Delta_d, target_doping, mu, tx, ty, g_J)
-            d2F_dM2   = (dF_dM_p - dF_dM_m) / (2.0 * eps_hf)
+            # Both gradient and curvature are computed analytically from a single
+            # diagonalization via perturbation theory (3× speedup over finite diff).
+            dF_dM_0, d2F_dM2 = self.compute_dF_dM_and_d2F(
+                M, Q, Delta_s, Delta_d, target_doping, mu, tx, ty, g_J)
+            self._scf_bdg_cache = None   # cache consumed; clear to prevent stale reuse
             gamma_M = 1.0 / (abs(d2F_dM2) + self.p.mu_LM)
             ALPHA_HF  = self.p.ALPHA_HF
             F_cluster_early = self.compute_cluster_free_energy(M, Q, mu, g_J, tx_bare, ty_bare, target_doping)
@@ -1833,14 +1772,17 @@ class RMFT_Solver:
             # --- Q_out: JT equilibrium from total BdG orbital coherence ---
             # Correct SC-activated chain: Δ≠0 → F(k)≠0 → ⟨τ_x⟩≠0 → Q≠0.
             # When Δ=0: ⟨τ_x⟩→0 self-consistently (no spontaneous JT).
-            Q_bdg = -(self.p.g_JT / self.p.K_lattice) * tau_x
-            if abs(Q_bdg) < 1e-6:
-                Q_exp_cl  = F_cluster_early['Q_exp']   # signed ⟨τ_x⟩
-                seed_mag  = min(max(abs(Q_exp_cl), 1e-4), 0.005 * self.p.lambda_hop)
-                Q_out     = np.sign(Q_exp_cl) * seed_mag if abs(Q_exp_cl) > 1e-6 else seed_mag
-            else:
-                Q_out = Q_bdg
-            Q_out = float(np.clip(Q_out, -0.5 * self.p.lambda_hop, 0.5 * self.p.lambda_hop))
+
+            Q_bdg    = -(self.p.g_JT / self.p.K_lattice) * tau_x
+            Q_exp_cl = F_cluster_early['Q_exp']   # signed ⟨τ_x⟩ from cluster ED
+            Q_min    = 1e-5   # below this the BdG signal is numerical noise
+            Q_seed   = float(np.clip(Q_exp_cl,
+                                     -0.002 * self.p.lambda_hop,
+                                      0.002 * self.p.lambda_hop))
+            # Smooth weight: w→1 when |Q_bdg| >> Q_min, w→0 when |Q_bdg| ≈ 0
+            w_bdg    = float(np.tanh((abs(Q_bdg) / max(Q_min, 1e-9))**2))
+            Q_out    = w_bdg * Q_bdg + (1.0 - w_bdg) * Q_seed
+            Q_out    = float(np.clip(Q_out, -0.5 * self.p.lambda_hop, 0.5 * self.p.lambda_hop))
 
             # --- Anderson mixing on [M,Q]; reset history on Q sign flip (valley jump) ---
             x_in  = np.array([M,     Q    ])
@@ -1879,7 +1821,7 @@ class RMFT_Solver:
             # --- Free energy with fully consistent converged state ---
             F_bdg = self.compute_bdg_free_energy(
                 M_mixed, Q_mixed, Delta_s_mixed, Delta_d_mixed, target_doping, mu_new,
-                tx_mixed, ty_mixed, g_J, g_Delta=g_Delta, rpa_factor=rpa_factor
+                tx_mixed, ty_mixed, g_J, rpa_factor=rpa_factor
             )
             F_cluster = self.compute_cluster_free_energy(M_mixed, Q_mixed, mu_new, g_J, tx_mixed_bare, ty_mixed_bare, target_doping)
 
@@ -1924,13 +1866,29 @@ class RMFT_Solver:
             history['lambda_max'].append(_lambda_max)
             history['gap_symmetry'].append(_gap_symmetry)
 
-            if verbose and (iteration % 10 == 0 or iteration < 5):
-                print(f"Iter {iteration:3d}: "
-                    f"M={M:.4f}  Q={Q:.5f}  "
-                    f"Δs={abs(Delta_s):.5f}  Δd={abs(Delta_d):.5f}  "
-                    f"n={n_kspace_new:.4f}  μ={mu_new:.4f}  F={F_bdg:.6f}  "
-                    f"χ₀={chi0:.3f}  rpa={rpa_factor:.2f}  χτ={chi_tau:.3f}  "
-                    f"JT={'✓' if irrep_info['jt_algebraically_allowed'] else '✗'}")
+            if verbose:
+                _elapsed = _time.time() - _scf_t0
+                _frac    = (iteration + 1) / self.p.max_iter
+                _w       = 38
+                _filled  = int(_w * _frac)
+                _bar     = "█" * _filled + "░" * (_w - _filled)
+                _eta_s   = (_elapsed / max(iteration + 1, 1)) * (self.p.max_iter - iteration - 1)
+                _h, _r   = divmod(int(_eta_s), 3600)
+                _m, _s   = divmod(_r, 60)
+                sys.stdout.write(
+                    f"\r  SCF [{_bar}] {iteration+1:3d}/{self.p.max_iter}"
+                    f"  {int(100*_frac):3d}%  conv={max_diff:.1e}"
+                    f"  ETA {_h}:{_m:02d}:{_s:02d}  delta={target_doping:.3f}  "
+                )
+                sys.stdout.flush()
+                if iteration % 10 == 0 or iteration < 5:
+                    print()
+                    print(f"  Iter {iteration:3d}: "
+                        f"M={M:.4f}  Q={Q:.5f}  "
+                        f"Ds={abs(Delta_s):.5f}  Dd={abs(Delta_d):.5f}  "
+                        f"n={n_kspace_new:.4f}  mu={mu_new:.4f}  F={F_bdg:.6f}  "
+                        f"chi0={chi0:.3f}  rpa={rpa_factor:.2f}  chi_tau={chi_tau:.3f}  "
+                        f"JT={'OK' if irrep_info['jt_algebraically_allowed'] else '--'}")
 
             # Update for next iteration
             M, Q, Delta_s, Delta_d, mu = M_mixed, Q_mixed, Delta_s_mixed, Delta_d_mixed, mu_new
@@ -1938,7 +1896,7 @@ class RMFT_Solver:
             if max_diff < self.p.tol and abs(n_kspace_new - (1 - target_doping)) < 0.01:
                 # --- Post-convergence Hessian / curvature test ---
                 hessian_result = self.compute_hessian(
-                    M, Q, abs(Delta_s) + abs(Delta_d), target_doping, mu_new, g_t, g_J, g_Delta
+                    M, Q, abs(Delta_s) + abs(Delta_d), target_doping, mu_new, g_t, g_J
                 )
                 if verbose:
                     print(f"\n{'='*80}")
@@ -1946,8 +1904,8 @@ class RMFT_Solver:
                     print(f"{'='*80}")
                     print(f"M = {M:.6f}")
                     print(f"Q = {Q:.6f} Å")
-                    print(f"|Δ_s| = {abs(Delta_s):.6f} eV  (on-site orbital B₁g, V_s weight={1.0-self.p.channel_mix:.2f})")
-                    print(f"|Δ_d| = {abs(Delta_d):.6f} eV  (inter-site d-wave B₁g, V_d weight={self.p.channel_mix:.2f})")
+                    print(f"|Δ_s| = {abs(Delta_s):.6f} eV  (on-site B₁g, V_s_scale={self.p.V_s_scale:.2f}, g_Δs≈1)")
+                    print(f"|Δ_d| = {abs(Delta_d):.6f} eV  (d-wave B₁g,  V_d_scale={self.p.V_d_scale:.2f}, g_Δd=g_J)")
                     print(f"|Δ|   = {abs(Delta_s)+abs(Delta_d):.6f} eV  (total)")
                     print(f"n = {n_kspace_new:.6f}")
                     print(f"μ = {mu:.6f} eV")
@@ -2048,47 +2006,44 @@ class RMFT_Solver:
         x_simple = (1 - alpha) * x_last + alpha * f_last
         return 0.5 * x_opt + 0.5 * x_simple
 
-    def _compute_k_observables(self, M, Q, Delta_s, Delta_d, target_doping, mu, tx, ty, g_J):
-        """
-        k-averaged BdG observables used inside the SCF loop.
-
-        Dispatches to VectorizedBdG.compute_observables_vectorized (batch LAPACK,
-        ~3-5x faster than the scalar loop below).  The scalar loop is preserved
-        as _compute_k_observables_scalar for debugging.
-        """
-        return self._get_vbdg().compute_observables_vectorized(
-            M, Q, Delta_s, Delta_d, target_doping, mu, tx, ty, g_J)
-
     def compute_dF_dM(self, M: float, Q: float, Delta_s: complex, Delta_d: complex, target_doping: float,
                       mu: float, tx: float, ty: float, g_J: float) -> float:
         """
-        Variational gradient ∂F/∂M via Hellmann-Feynman:
-
-        ∂F/∂M = Σ_{k,n} f(E_n(k)) · ⟨ψ_n(k)| ∂H_BdG/∂M |ψ_n(k)⟩
-
-        ∂H_BdG/∂M = h_prefactor · diag(sz_orb) embedded in 16×16 BdG
-        (particle A: −sz, particle B: +sz, hole A: +sz, hole B: −sz).
-        Used via Newton step M_newton = M − (1/|∂²F/∂M²|)·∂F/∂M.
+        Variational gradient ∂F/∂M via Hellmann-Feynman (single diagonalization).
+        Thin wrapper around compute_dF_dM_and_d2F for backward compatibility.
         Returns ∂F/∂M in eV per site (double unit cell: /2).
+        """
+        grad, _ = self.compute_dF_dM_and_d2F(M, Q, Delta_s, Delta_d, target_doping,
+                                               mu, tx, ty, g_J)
+        return grad
+
+    def compute_dF_dM_and_d2F(self, M: float, Q: float,
+                                Delta_s: complex, Delta_d: complex,
+                                target_doping: float,
+                                mu: float, tx: float, ty: float,
+                                g_J: float) -> Tuple[float, float]:
+        """
+        Compute ∂F/∂M **and** ∂²F/∂M² analytically from a single BdG diagonalization.
+
+        Hellmann-Feynman first derivative:
+            ∂F/∂M = Σ_{k,n} f_n · ⟨ψ_n|∂H/∂M|ψ_n⟩
+
+        Second derivative (∂H/∂M is diagonal, so the curvature has two contributions):
+            Term 1 (diagonal): Σ_{k,n} (∂f_n/∂E_n) · ⟨ψ_n|∂H/∂M|ψ_n⟩²
+            Term 2 (off-diag): Σ_{k,n≠m} (f_n − f_m)/(E_m − E_n) · |⟨ψ_n|∂H/∂M|ψ_m⟩|²
+
+        Both follow from second-order perturbation theory on the free energy functional.
+        Replaces the three-point finite-difference stencil (3 diagonalizations → 1).
+
+        Returns
+        -------
+        (dF_dM, d2F_dM2) : both in eV per site (double unit cell correction applied).
         """
         tx_bare, ty_bare = self.effective_hopping_anisotropic(Q)
         t_sq_avg = 0.5 * (tx_bare**2 + ty_bare**2)
-        # Prefactor of the Weiss operator (derivative of h_afm w.r.t. M)
         h_prefactor = g_J * (self.p.U_mf / 2.0 + self.p.Z * 2.0 * t_sq_avg / self.p.U) / 2.0
 
-        # Weiss operator: ∂H/∂M = h_prefactor·sz_orb, embedded into 16×16 BdG diagonal
         sz_orb = np.array([1.0, -1.0, self.p.eta, -self.p.eta]) * h_prefactor
-
-        # Build BdG stack and batch-diagonalise
-        N = self.N_k
-        H_stack = np.zeros((N, 16, 16), dtype=complex)
-        for i, kvec in enumerate(self.k_points):
-            H_stack[i] = self.build_bdg_matrix(kvec, M, Q, Delta_s, Delta_d,
-                                                target_doping, mu, tx, ty, g_J)
-        eigvals_all, eigvecs_all = np.linalg.eigh(H_stack)  # (N,16), (N,16,16)
-        f_all = self.fermi_function(eigvals_all)              # (N,16)
-
-        # ⟨ψ_n|∂H/∂M|ψ_n⟩ = Σ_i dH_diag[i]·|ψ_n[i]|² (∂H/∂M is diagonal)
         dH_diag = np.array([
             -sz_orb[0], -sz_orb[1], -sz_orb[2], -sz_orb[3],   # particle A
             +sz_orb[0], +sz_orb[1], +sz_orb[2], +sz_orb[3],   # particle B
@@ -2096,12 +2051,46 @@ class RMFT_Solver:
             -sz_orb[0], -sz_orb[1], -sz_orb[2], -sz_orb[3],   # hole B
         ])  # (16,)
 
-        exp_val = np.einsum('i,kin->kn', dH_diag, np.abs(eigvecs_all)**2)  # (N,16)
-        grad = float(np.einsum('k,kn,kn->', self.k_weights, f_all, exp_val))
-        return grad / 2.0  # per-site (double unit cell correction)
+        vbdg = self._get_vbdg()
+        # Reuse BdG cache from the SCF loop if available
+        if hasattr(self, '_scf_bdg_cache') and self._scf_bdg_cache is not None:
+            ev, ec = self._scf_bdg_cache
+        else:
+            ev, ec = vbdg.diag_all_k(M, Q, Delta_s, Delta_d,
+                                       target_doping, mu, tx, ty, g_J)   # (N,16), (N,16,16)
+        f_all = self.fermi_function(ev)   # (N,16)
+
+        # ⟨ψ_n|∂H/∂M|ψ_n⟩ per (k, n)
+        exp_nn = np.einsum('i,kin->kn', dH_diag, np.abs(ec)**2)   # (N,16)
+
+        # --- first derivative ---
+        grad = float(np.einsum('k,kn,kn->', self.k_weights, f_all, exp_nn)) / 2.0
+
+        # --- second derivative ---
+        # Term 1: diagonal — ∂f/∂E · ⟨∂H/∂M⟩²
+        kT = self.p.kT
+        df_dE = -f_all * (1.0 - f_all) / max(kT, 1e-10)   # (N,16)  ≤ 0
+        term1 = float(np.einsum('k,kn,kn->', self.k_weights, df_dE, exp_nn**2))
+
+        # Term 2: off-diagonal — Σ_{n≠m} (f_n − f_m)/(E_m − E_n) · |⟨ψ_n|∂H|ψ_m⟩|²
+        # ∂H/∂M is diagonal, so ⟨ψ_n|∂H|ψ_m⟩ = Σ_i dH_diag[i] · ec[k,i,n]* · ec[k,i,m].
+        # Using real(|ec|²) is not enough here since n≠m terms need the full complex product.
+        off = np.einsum('i,kin,kim->knm', dH_diag, ec.conj(), ec)   # (N,16,16)
+        off2 = np.abs(off)**2   # |matrix element|²
+
+        dE_nm = ev[:, None, :] - ev[:, :, None]   # E_m − E_n,  (N,16,16)
+        df_nm = f_all[:, :, None] - f_all[:, None, :]   # f_n − f_m
+        safe  = np.abs(dE_nm) > 1e-8
+        ratio = np.where(safe, df_nm / np.where(safe, dE_nm, 1.0), df_dE[:, :, None])
+        # Zero out diagonal (n==n) to avoid counting self-terms
+        np.einsum('knn->kn', ratio)[:] = 0.0
+        term2 = float(np.einsum('k,knm,knm->', self.k_weights, ratio, off2))
+
+        d2F = (term1 + term2) / 2.0
+        return grad, d2F
 
     def compute_hessian(self, M: float, Q: float, Delta: float, target_doping: float,
-                        mu: float, g_t: float, g_J: float, g_Delta: float,
+                        mu: float, g_t: float, g_J: float,
                         eps_M: float = 1e-3, eps_Q: float = 1e-4,
                         eps_D: float = 1e-4) -> Dict:
         """
@@ -2112,15 +2101,15 @@ class RMFT_Solver:
           - Any eigenvalue < 0: saddle point (unstable direction) ✗
           - Near-zero eigenvalue: flat/Goldstone direction
 
-        g_t is passed explicitly to avoid recomputing it from _last_density inside the closure,
-        which would risk using a stale doping value and double-counting renormalization.
+        g_t, g_J are passed explicitly to avoid recomputing from stale _last_density.
+        g_Delta_s/g_Delta_d are derived internally from target_doping.
 
         Returns dict with 'H' (3×3), 'eigenvalues', 'is_minimum', 'min_curvature'.
         """
         def F(m, q, d):
             tb_x, tb_y = self.effective_hopping_anisotropic(q)
             return self.compute_bdg_free_energy(
-                m, q, complex(d), complex(0), target_doping, mu, g_t * tb_x, g_t * tb_y, g_J, g_Delta
+                m, q, complex(d), complex(0), target_doping, mu, g_t * tb_x, g_t * tb_y, g_J
             )
 
         F0 = F(M, Q, Delta)
@@ -2203,9 +2192,7 @@ def alpha_K_validity_bound(solver) -> float:
     h_afm = g_J * (solver.p.U_mf / 2.0 + solver.p.Z * 2.0 * t2 / solver.p.U) * f_d * 0.5
     if h_afm > 1e-6:
         bound = min(bound, h_afm / Delta_CF)
-
     return float(np.clip(bound, 1.1, 8.0))
-
 
 # =============================================================================
 # 6. VECTORIZED BdG DIAGONALISATION
@@ -2233,7 +2220,6 @@ class VectorizedBdG:
         self.solver   = solver
         self._kpts    = solver.k_points       # (N_k, 2)
         self._N_k     = solver.N_k
-        self._phi_k   = solver.phi_k          # (N_k,)  d-wave form factor
         # Pre-allocated buffer, reused each iteration to avoid GC pressure
         self._H_stack = np.zeros((self._N_k, 16, 16), dtype=complex)
 
@@ -2241,24 +2227,55 @@ class VectorizedBdG:
     # Internal helpers
     # ------------------------------------------------------------------
 
-    def _fill_H_stack(self, M: float, Q: float,
-                      Delta_s: complex, Delta_d: complex,
-                      target_doping: float, mu: float,
-                      tx: float, ty: float, g_J: float) -> None:
+    def _build_H_stack(self,
+                       kpts: np.ndarray,
+                       M: float, Q: float,
+                       Delta_s: complex, Delta_d: complex,
+                       target_doping: float, mu: float,
+                       tx: float, ty: float,
+                       g_J: float,
+                       out: Optional[np.ndarray] = None) -> np.ndarray:
         """
-        Fill the (N_k, 16, 16) BdG stack.
+        Build the (N, 16, 16) BdG Hamiltonian stack for an arbitrary kpts array.
 
-        k-independent blocks (H_A, H_B, D_onsite) are built once;
-        k-dependent blocks (T_AB dispersion, D_intersite d-wave) are
-        filled via broadcasting over the k axis.
+        16×16 Nambu basis: [Part_A(0:4), Part_B(4:8), Hole_A(8:12), Hole_B(12:16)],
+        each sub-block in [6↑, 6↓, 7↑, 7↓] orbital basis:
+
+        ┌──────────────┬──────────────────────────────┐
+        │  H_A   T_AB  │  D_s        D_d              │  Part_A, Part_B
+        │  T_AB† H_B   │  D_d        D_s              │
+        ├──────────────┼──────────────────────────────┤
+        │  D_s†  D_d†  │  −H_A*     −T_AB†            │  Hole_A, Hole_B
+        │  D_d†  D_s†  │  −T_AB*    −H_B*             │
+        └──────────────┴──────────────────────────────┘
+
+        D_s (on-site, channel s):  Δ_s · [6↑↔7↓ singlet, φ=1]
+        D_d (inter-site, channel d): Δ_d · φ(k) · [6↑↔7↓ singlet, φ(k)=cos kx−cos ky]
+        F_AA = u_A·v_A* → feeds Δ_s gap eq.   F_AB = u_A·v_B* → feeds Δ_d gap eq.
+
+        Parameters
+        ----------
+        kpts : (N, 2) array of k-points.  May be self._kpts (full grid) or any
+               arbitrary sub-grid (e.g. k+Q shifted for chi0 routines).
+        out  : optional pre-allocated (N, 16, 16) complex buffer.  If provided
+               the result is written in-place (no heap allocation) and the same
+               array is returned.  Pass self._H_stack here for the hot SCF path
+               to avoid per-iteration GC pressure.
         """
-        H = self._H_stack
-        H[:] = 0.0 + 0.0j
+        N = len(kpts)
+        if out is None:
+            H = np.zeros((N, 16, 16), dtype=complex)
+        else:
+            H = out
+            H[:] = 0.0 + 0.0j
+
+        a = self.solver.p.a
 
         # --- k-independent blocks ---
         H_A  = self.solver.build_local_hamiltonian_for_bdg(+1.0, M, Q, mu, g_J, target_doping)
         H_B  = self.solver.build_local_hamiltonian_for_bdg(-1.0, M, Q, mu, g_J, target_doping)
         D_on = self.solver.build_pairing_block(Delta_s)    # 4×4 on-site singlet
+        D_dag = np.conj(D_on).T
 
         # Particle/hole diagonal blocks (broadcast to all k)
         H[:, 0:4,   0:4  ] = H_A
@@ -2267,27 +2284,30 @@ class VectorizedBdG:
         H[:, 12:16, 12:16] = -np.conj(H_B)
 
         # On-site pairing (k-independent)
-        D_dag = np.conj(D_on).T
         H[:, 0:4,   8:12 ] = D_on
         H[:, 4:8,  12:16 ] = D_on
         H[:, 8:12,  0:4  ] = D_dag
         H[:, 12:16, 4:8  ] = D_dag
 
         # --- k-dependent: dispersion γ(k) = -2(tx cos kx + ty cos ky) ---
-        kx = self._kpts[:, 0]
-        ky = self._kpts[:, 1]
-        a  = self.solver.p.a
-        gamma_k = -2.0 * (tx * np.cos(kx * a) + ty * np.cos(ky * a))   # (N_k,)
+        kx = kpts[:, 0]
+        ky = kpts[:, 1]
+        gamma_k = -2.0 * (tx * np.cos(kx * a) + ty * np.cos(ky * a))   # (N,)
 
         # T_AB = γ(k)·I₄ → diagonal sub-blocks via index broadcasting
         di = np.arange(4)
-        H[:, di,     di + 4 ] = gamma_k[:, None]   # particle A→B
-        H[:, di + 4, di     ] = gamma_k[:, None]   # particle B→A (Hermitian)
-        H[:, di + 8, di + 12] = -gamma_k[:, None]  # hole sector: −γ*
-        H[:, di + 12,di + 8 ] = -gamma_k[:, None]
+        H[:, di,      di + 4 ] = gamma_k[:, None]   # particle A→B
+        H[:, di + 4,  di     ] = gamma_k[:, None]   # particle B→A (Hermitian)
+        H[:, di + 8,  di + 12] = -gamma_k[:, None]  # hole sector: −γ*
+        H[:, di + 12, di + 8 ] = -gamma_k[:, None]
 
         # --- k-dependent: inter-site d-wave pairing D_int[k] = Delta_d·φ(k)·pattern ---
-        phi = self._phi_k * Delta_d   # (N_k,) complex
+        # For the full k-grid (out= path) we reuse the pre-cached form factor;
+        # for arbitrary sub-grids (chi0 / k+Q) we recompute from kpts.
+        if out is not None:
+            phi = self.solver.phi_k * Delta_d   # (N_k,) — cached, no trig call
+        else:
+            phi = (np.cos(kx * a) - np.cos(ky * a)) * Delta_d   # (N,) fresh
         H[:, 0,  15] +=  phi          # A:6↑ → B:7↓
         H[:, 1,  14] -= phi           # A:6↓ → B:7↑ (singlet sign)
         H[:, 4,  11] +=  phi          # B:6↑ → A:7↓
@@ -2297,31 +2317,63 @@ class VectorizedBdG:
         H[:, 14,  1] -= phi_c
         H[:, 11,  4] +=  phi_c
         H[:, 10,  5] -= phi_c
+        return H
 
     def diag_all_k(self, M: float, Q: float,
                    Delta_s: complex, Delta_d: complex,
                    target_doping: float, mu: float,
                    tx: float, ty: float,
                    g_J: float) -> Tuple[np.ndarray, np.ndarray]:
-        """Diagonalise all k-points in one batched LAPACK call."""
-        self._fill_H_stack(M, Q, Delta_s, Delta_d, target_doping, mu, tx, ty, g_J)
+        """Diagonalise all k-points in one batched LAPACK call.
+
+        Uses the pre-allocated self._H_stack buffer (no heap allocation).
+        """
+        self._build_H_stack(self._kpts, M, Q, Delta_s, Delta_d,
+                            target_doping, mu, tx, ty, g_J,
+                            out=self._H_stack)
         ev_all, ec_all = np.linalg.eigh(self._H_stack)  # (N_k,16), (N_k,16,16)
         return ev_all, ec_all
+
+    def diag_kpts(self,
+                  kpts: np.ndarray,
+                  M: float, Q: float,
+                  Delta_s: complex, Delta_d: complex,
+                  target_doping: float, mu: float,
+                  tx: float, ty: float,
+                  g_J: float) -> Tuple[np.ndarray, np.ndarray]:
+        """
+        Diagonalise an **arbitrary** kpts array (N, 2) in one batched LAPACK call.
+
+        Returns (ev, ec) with shapes (N, 16) and (N, 16, 16).
+        Used by chi0 routines that need k and k+Q simultaneously.
+        Allocates a fresh buffer (kpts may differ in size from self._kpts).
+        """
+        H = self._build_H_stack(kpts, M, Q, Delta_s, Delta_d,
+                                 target_doping, mu, tx, ty, g_J)
+        return np.linalg.eigh(H)
 
     def compute_observables_vectorized(self, M: float, Q: float,
                                        Delta_s: complex, Delta_d: complex,
                                        target_doping: float, mu: float,
                                        tx: float, ty: float,
-                                       g_J: float) -> Dict:
+                                       g_J: float,
+                                       _bdg_cache: tuple = None) -> Dict:
         """
         Vectorised observables: M, Q (τ_x), density, Pair_s, Pair_d.
 
         Computes the same quantities as RMFT_Solver.compute_observables_from_bdg
         but for all k simultaneously via broadcasting, avoiding any Python loop.
 
+        _bdg_cache : optional (ev, ec) tuple from a previous diag_all_k call with
+                     the same parameters.  Pass this from the SCF loop to avoid a
+                     redundant diagonalisation.
+
         Returns a dict with the same keys as compute_observables_from_bdg.
         """
-        ev, ec = self.diag_all_k(M, Q, Delta_s, Delta_d, target_doping, mu, tx, ty, g_J)
+        if _bdg_cache is not None:
+            ev, ec = _bdg_cache
+        else:
+            ev, ec = self.diag_all_k(M, Q, Delta_s, Delta_d, target_doping, mu, tx, ty, g_J)
         kT = self.solver.p.kT
 
         # Fermi-Dirac factors: (N_k, 16)
@@ -2386,16 +2438,22 @@ class VectorizedBdG:
                                    Delta_s: complex, Delta_d: complex,
                                    target_doping: float, mu: float,
                                    tx: float, ty: float,
-                                   g_J: float, g_Delta: float,
-                                   rpa_factor: float) -> Tuple[float, float]:
+                                   g_J: float, g_Delta_s: float, g_Delta_d: float,
+                                   rpa_factor: float,
+                                   _bdg_cache: tuple = None) -> Tuple[float, float]:
         """
         Vectorised gap equation — replaces solver.solve_gap_equation_k.
 
         Computes F_AA (on-site) and F_AB (inter-site) pairing amplitudes from
         the batched BdG eigensystem and returns (Delta_s_new, Delta_d_new).
+
+        _bdg_cache : optional (ev, ec) from a prior diag_all_k call (same params).
         """
         p  = self.solver.p
-        ev, ec = self.diag_all_k(M, Q, Delta_s, Delta_d, target_doping, mu, tx, ty, g_J)
+        if _bdg_cache is not None:
+            ev, ec = _bdg_cache
+        else:
+            ev, ec = self.diag_all_k(M, Q, Delta_s, Delta_d, target_doping, mu, tx, ty, g_J)
 
         arg = np.clip(ev / p.kT, -100, 100)
         f12 = 1.0 - 2.0 / (1.0 + np.exp(arg))   # (N_k, 16)
@@ -2423,12 +2481,10 @@ class VectorizedBdG:
         F_AA = float(np.real(np.dot(w, pair_s))) / 4.0
         F_AB = float(np.real(np.dot(w * phi, pair_d))) / 4.0
 
-        V_total = (p.g_JT**2 / max(p.K_lattice, 1e-9)) * rpa_factor
-        V_s = (1.0 - p.channel_mix) * V_total
-        V_d = p.channel_mix          * V_total
-
-        return abs(g_Delta * V_s * F_AA), abs(g_Delta * V_d * F_AB)
-
+        _V_base_gev = (p.g_JT**2 / max(p.K_lattice, 1e-9)) * rpa_factor
+        V_s = p.V_s_scale * _V_base_gev
+        V_d = p.V_d_scale * _V_base_gev
+        return abs(g_Delta_s * V_s * F_AA), abs(g_Delta_d * V_d * F_AB)
 
 # =============================================================================
 # 7. FAST SCF WRAPPER  (uses VectorizedBdG)
@@ -2437,13 +2493,14 @@ class VectorizedBdG:
 def run_scf_fast(solver: 'RMFT_Solver',
                  target_doping: float,
                  alpha_K: float,
-                 channel_mix: float,
+                 V_s_scale: float,
+                 V_d_scale: float,
                  initial_M: float = 0.25,
                  initial_Q: float = 1e-4,
                  initial_Delta: float = 0.04,
                  verbose: bool = False) -> Dict:
     """
-    Run an SCF calculation for given (doping, alpha_K, channel_mix) using
+    Run an SCF calculation for given (doping, alpha_K, V_s_scale, V_d_scale) using
     the vectorised BdG.  Thread-safe: operates on a shallow copy of solver.
 
     K_lattice is re-derived from alpha_K so the copy is fully self-consistent.
@@ -2452,7 +2509,8 @@ def run_scf_fast(solver: 'RMFT_Solver',
     s               = copy.copy(solver)
     s.p             = copy.copy(solver.p)
     s.p.alpha_K     = float(alpha_K)
-    s.p.channel_mix = float(channel_mix)
+    s.p.V_s_scale   = float(V_s_scale)
+    s.p.V_d_scale   = float(V_d_scale)
     s.p.K_lattice   = s.p.g_JT**2 / (s.p.alpha_K * max(s.p.Delta_CF, 1e-9))
     s._vbdg         = None   # reset so _get_vbdg() builds a fresh VectorizedBdG for this copy
 
@@ -2470,101 +2528,175 @@ def run_scf_fast(solver: 'RMFT_Solver',
     )
 
 # =============================================================================
-# 8. BAYESIAN OPTIMISER
+# # 8. BAYESIAN OPTIMISER
 # =============================================================================
 
-class OptimPoint:
-    """A single evaluated point in the (doping, alpha_K, channel_mix) search space."""
-    __slots__ = ('doping', 'alpha_K', 'channel_mix', 'Delta_total', 'converged', 'result')
+def run_scf_material(solver: 'RMFT_Solver',
+                     target_doping: float,
+                     Delta_tetra:   float,
+                     u:             float,
+                     g_JT:          float,
+                     V_s_scale:     float = 1.0,
+                     V_d_scale:     float = 1.0,
+                     initial_M:     float = 0.25,
+                     initial_Q:     float = 1e-4,
+                     initial_Delta: float = 0.04,
+                     verbose:       bool  = False) -> Dict:
+    """Run SCF for material parameters (Delta_tetra, u, g_JT, doping).
+    Calls __post_init__ to recompute Delta_CF, U, K_lattice consistently.
 
-    def __init__(self, doping: float, alpha_K: float, channel_mix: float,
-                 Delta_total: float, converged: bool, result: Optional[Dict] = None):
+    alpha_K is inherited unchanged from solver.p.alpha_K. It is a fixed design parameter (not Bayesian) enforcing K < K_spont.
+
+    alpha_K is inherited (fixed, non-Bayesian) and enforces K < K_spont.
+
+    Delta_tetra or g_JT update Delta_CF and K_lattice in __post_init__, but alpha_K = K_spont / K stays fixed.
+
+    If alpha_K < 1 after __post_init__, set initial_Delta = 0 and warn (JT only from SC).
+    """
+    s = copy.copy(solver)
+    s.p = copy.copy(solver.p)
+    s.p.Delta_tetra = float(Delta_tetra)
+    s.p.u           = float(u)
+    s.p.g_JT        = float(g_JT)
+    s.p.V_s_scale   = float(V_s_scale)
+    s.p.V_d_scale   = float(V_d_scale)
+    s.p.__post_init__()   # recomputes Delta_CF, U, K_lattice = g²/(alpha_K·Delta_CF)
+    s._vbdg = None
+
+
+    return s.solve_self_consistent(
+        target_doping=target_doping,
+        initial_M=initial_M, initial_Q=initial_Q, initial_Delta=initial_Delta,
+        verbose=verbose)
+
+
+class OptimPoint:
+    """Evaluated point in (doping, Delta_tetra, u, g_JT) space with physics diagnostics.
+
+    Diagnostics (all derived analytically from SCF output, no numeric derivatives):
+      lambda_JT  : (g_eff^2/K)*chi_tau -- JT feedback strength; viable in (0.05, 1.0)
+      lambda_max : largest eigenvalue of linearised gap matrix (>1 -> gap instability)
+      stoner_ok  : AFM Stoner criterion not exceeded
+    """
+    __slots__ = ('doping', 'Delta_tetra', 'u', 'g_JT', 'V_s_scale', 'V_d_scale',
+                 'Delta_total', 'converged', 'result',
+                 'lambda_JT', 'lambda_max', 'stoner_ok', 'score')
+
+    def __init__(self, doping, Delta_tetra, u, g_JT,
+                 Delta_total, converged, result=None,
+                 V_s_scale=1.0, V_d_scale=1.0,
+                 lambda_JT=0.0, lambda_max=0.0, stoner_ok=True, score=0.0):
         self.doping      = doping
-        self.alpha_K     = alpha_K
-        self.channel_mix = channel_mix
+        self.Delta_tetra = Delta_tetra
+        self.u           = u
+        self.g_JT        = g_JT
+        self.V_s_scale   = V_s_scale
+        self.V_d_scale   = V_d_scale
         self.Delta_total = Delta_total
         self.converged   = converged
         self.result      = result
+        self.lambda_JT   = lambda_JT
+        self.lambda_max  = lambda_max
+        self.stoner_ok   = stoner_ok
+        self.score       = score
 
-    def __repr__(self) -> str:
-        return (f"OptimPoint(δ={self.doping:.3f}, α={self.alpha_K:.3f}, "
-                f"mix={self.channel_mix:.2f}, Δ={self.Delta_total:.5f}, conv={self.converged})")
+    def __repr__(self):
+        regime = ('SC-trig' if 0.05 < self.lambda_JT < 1.0
+                  else ('spont?' if self.lambda_JT >= 1.0 else 'closed'))
+        return (f"OptimPoint(doping={self.doping:.3f}, Dt={self.Delta_tetra:.3f}, "
+                f"u={self.u:.2f}, g={self.g_JT:.3f}, "
+                f"Delta={self.Delta_total:.5f}, score={self.score:.5f}, "
+                f"lJT={self.lambda_JT:.3f}[{regime}])")
 
 
 class BayesianOptimizer:
+    """GP Bayesian optimiser over the 5D **material** space (Delta_tetra, u, g_JT, V_s_scale, V_d_scale).
+
+    Material parameters fix the Hamiltonian structure:
+      • Γ₆–Γ₇ splitting Δ_CF  → multipolar rigidity          (from Delta_tetra)
+      • Hubbard U              → AFM superexchange strength    (from u)
+      • e-ph coupling g_JT     → JT pairing channel amplitude  (from g_JT)
+      • V_s_scale              → on-site Γ₆⊗Γ₇ singlet strength (independent)
+      • V_d_scale              → inter-site d-wave B₁g strength (independent)
+    V_s_scale and V_d_scale are searched independently so their sum is not constrained.
+    Doping δ is an *experimental control variable*: for each material we scan δ independently and return the **maximum** Δ over the doping range.
+
+        score = Delta_total
+                * (1 if stoner_ok else W_STONER)
+                * (1 if converged else 0.1)
     """
-    Gaussian-Process Bayesian optimiser over (doping, alpha_K, channel_mix).
 
-    Objective: maximise Delta_total = Delta_s + Delta_d subject to the
-    alpha_K hard constraint derived from BCS/RPA validity.
-
-    Algorithm:
-      1. Latin Hypercube Sampling for n_initial seed evaluations.
-      2. Fit Matérn(ν=2.5) GP surrogate.
-      3. Maximise Expected Improvement (EI) acquisition → next point.
-      4. Repeat n_iterations times.
-
-    Falls back to random LHS search if scikit-learn is not available.
-    """
+    W_STONER_BAD   = 0.20
 
     def __init__(self,
-                 solver: 'RMFT_Solver',
-                 doping_bounds:    Tuple[float, float] = (0.08, 0.30),
-                 alpha_bounds:     Tuple[float, float] = (1.05, 3.5),
-                 mix_bounds:       Tuple[float, float] = (0.0,  1.0),
-                 alpha_K_hard_max: Optional[float]     = None,
-                 n_workers:        int                  = 1):
+                 solver,
+                 doping_bounds      = (0.08, 0.30),
+                 Delta_tetra_bounds = (-0.30, -0.05),
+                 u_bounds           = (4.0, 8.0),
+                 gJT_bounds         = (0.4, 1.2),
+                 n_doping_scan      = 5,
+                 n_workers          = 1):
+        """
+        3D Bayesian optimiser over material space (Delta_tetra, u, g_JT).
 
-        self.solver        = solver
-        self.doping_bounds = doping_bounds
-        self.alpha_bounds  = alpha_bounds
-        self.mix_bounds    = mix_bounds
-        self.n_workers     = n_workers
+        V_s_scale = V_d_scale = 1.0 are held fixed here; channel strengths are
+        refined in a separate 2D pass by ChannelOptimizer after the best material
+        point is found.  This avoids the alpha_K × V_scale degeneracy that would
+        make a 5D GP poorly conditioned with O(200) evaluations.
+
+        Parameters
+        ----------
+        doping_bounds      : (lo, hi)  range searched *inside* each material trial
+        Delta_tetra_bounds : (lo, hi)  BO dimension 1
+        u_bounds           : (lo, hi)  BO dimension 2  (U/t0)
+        gJT_bounds         : (lo, hi)  BO dimension 3
+        n_doping_scan      : doping grid points per material trial
+        n_workers          : parallel workers for the doping scan
+        """
+        self.solver             = solver
+        self.doping_bounds      = doping_bounds
+        self.Delta_tetra_bounds = Delta_tetra_bounds
+        self.u_bounds           = u_bounds
+        self.gJT_bounds         = gJT_bounds
+        self.n_doping_scan      = n_doping_scan
+        self.n_workers          = n_workers
         self.observations: List[OptimPoint] = []
-        self._gp: Optional[object]          = None  # GaussianProcessRegressor
+        self._gp = None
 
-        # alpha_K hard constraint: tightest of user input and physical bound
-        auto_bound = alpha_K_validity_bound(solver)
-        self.alpha_K_hard_max = float(
-            min(alpha_K_hard_max if alpha_K_hard_max is not None else np.inf,
-                auto_bound, alpha_bounds[1]))
+        print(f"  BayesianOptimizer (3D material space, V_s=V_d=1 fixed):")
+        print(f"    Δ_tet ∈ {Delta_tetra_bounds},  u ∈ {u_bounds},  g_JT ∈ {gJT_bounds}")
+        print(f"    inner doping scan: {n_doping_scan} points ∈ {doping_bounds}")
 
-        print(f"  BayesianOptimizer: alpha_K_hard_max = {self.alpha_K_hard_max:.3f}"
-              f"  (validity bound: {auto_bound:.3f})")
-        print(f"  Search space: δ∈{doping_bounds},  α_K∈{alpha_bounds},  mix∈{mix_bounds}")
-        print(f"  Parallel workers: {n_workers}")
-
-        # GP kernel: Matern(nu=2.5) x constant amplitude + white noise
         if _SKLEARN_AVAILABLE:
+            # 3-dimensional kernel: (Delta_tetra, u, g_JT)
             kernel = (ConstantKernel(1.0, (1e-3, 1e3))
-                      * Matern(length_scale=[0.1, 0.5, 0.3], nu=2.5)
+                      * Matern(length_scale=[0.1, 0.5, 0.2], nu=2.5)
                       + WhiteKernel(noise_level=1e-4, noise_level_bounds=(1e-6, 0.1)))
             self._gp = GaussianProcessRegressor(
                 kernel=kernel, alpha=1e-6,
                 n_restarts_optimizer=5, normalize_y=True)
 
     # ------------------------------------------------------------------
-    # Normalisation helpers
+    # Normalisation helpers — 3D material space only
     # ------------------------------------------------------------------
 
-    def _normalize(self, doping: float, alpha: float, mix: float) -> np.ndarray:
-        """Map (doping, alpha_K, mix) → [0,1]³."""
-        d_n = (doping - self.doping_bounds[0]) / (self.doping_bounds[1] - self.doping_bounds[0])
-        a_n = (alpha  - self.alpha_bounds[0])  / (self.alpha_bounds[1]  - self.alpha_bounds[0])
-        m_n = (mix    - self.mix_bounds[0])    / (self.mix_bounds[1]    - self.mix_bounds[0])
-        return np.array([d_n, a_n, m_n])
+    def _normalize(self, Delta_tetra, u, gJT):
+        """Map (Delta_tetra, u, gJT) → [0,1]³."""
+        return np.array([
+            (Delta_tetra - self.Delta_tetra_bounds[0]) / (self.Delta_tetra_bounds[1] - self.Delta_tetra_bounds[0]),
+            (u           - self.u_bounds[0])           / (self.u_bounds[1]           - self.u_bounds[0]),
+            (gJT         - self.gJT_bounds[0])         / (self.gJT_bounds[1]         - self.gJT_bounds[0]),
+        ])
 
-    def _denormalize(self, x: np.ndarray) -> Tuple[float, float, float]:
-        doping = self.doping_bounds[0] + x[0] * (self.doping_bounds[1] - self.doping_bounds[0])
-        alpha  = self.alpha_bounds[0]  + x[1] * (self.alpha_bounds[1]  - self.alpha_bounds[0])
-        mix    = self.mix_bounds[0]    + x[2] * (self.mix_bounds[1]    - self.mix_bounds[0])
-        return float(doping), float(alpha), float(mix)
+    def _denormalize(self, x):
+        """Map [0,1]³ → (Delta_tetra, u, gJT)."""
+        Delta_tetra = self.Delta_tetra_bounds[0] + x[0] * (self.Delta_tetra_bounds[1] - self.Delta_tetra_bounds[0])
+        u           = self.u_bounds[0]           + x[1] * (self.u_bounds[1]           - self.u_bounds[0])
+        gJT         = self.gJT_bounds[0]         + x[2] * (self.gJT_bounds[1]         - self.gJT_bounds[0])
+        return float(Delta_tetra), float(u), float(gJT)
 
-    def _clip_alpha(self, alpha: float) -> float:
-        return float(np.clip(alpha, self.alpha_bounds[0], self.alpha_K_hard_max))
-
-    def _lhs_sample(self, n: int) -> np.ndarray:
-        """Latin Hypercube Sampling on [0,1]³ (reproducible seed)."""
+    def _lhs_sample(self, n):
+        """Latin Hypercube sample in [0,1]³ (3D material space)."""
         rng = np.random.default_rng(seed=42)
         samples = np.zeros((n, 3))
         for j in range(3):
@@ -2573,236 +2705,893 @@ class BayesianOptimizer:
         return samples
 
     # ------------------------------------------------------------------
-    # GP fitting and acquisition
+    # Inner doping scan — physics core
     # ------------------------------------------------------------------
 
-    def _fit_gp(self) -> None:
-        """Fit the GP surrogate to current observations."""
+    def _evaluate_material(self, Delta_tetra: float, u: float, gJT: float,
+                           Vs: float = 1.0, Vd: float = 1.0) -> 'OptimPoint':
+        # Vs=1.0, Vd=1.0 fixed in Phase 1. ChannelOptimizer refines these in Phase 2.
+        """
+        Evaluate a material defined by (Delta_tetra, u, gJT) by scanning
+        n_doping_scan doping values and returning the best OptimPoint.
+
+        Physical rationale
+        ------------------
+        1. Material params fix the Hamiltonian: Δ_CF, U, K_lattice.
+        2. Doping δ only shifts μ and Gutzwiller factors.
+        3. For a given material we want the δ that maximises Δ(δ).
+        4. The GP sees only the per-material best score — no redundant
+           evaluations of the same (Δ_tet, u, g) with different dopings.
+
+        Warm-starting: each doping step initialises from the previous
+        converged solution (ordered from low δ to high δ), so the SCF
+        spends fewer iterations near convergence.
+        """
+        doping_grid = np.linspace(
+            self.doping_bounds[0], self.doping_bounds[1], self.n_doping_scan)
+
+        print(f"\n  ── Material trial: Δ_tet={Delta_tetra:.3f}  u={u:.2f}  g={gJT:.3f} ──")
+        print(f"     Doping scan: {self.n_doping_scan} points ∈ [{self.doping_bounds[0]:.2f}, {self.doping_bounds[1]:.2f}]")
+
+        best_pt: Optional['OptimPoint'] = None
+        prev_result: Optional[Dict] = None
+
+        for i, doping in enumerate(doping_grid):
+            # Warm-start from previous doping step
+            if prev_result is not None:
+                init_M     = prev_result.get('M', 0.25)
+                init_Q     = prev_result.get('Q', 1e-4)
+                init_Delta = prev_result.get('Delta_s', 0.0) + prev_result.get('Delta_d', 0.0)
+                init_Delta = max(init_Delta, 0.01)
+            else:
+                init_M, init_Q, init_Delta = 0.25, 1e-4, 0.04
+
+            pt = self._evaluate_point(
+                doping, Delta_tetra, u, gJT, Vs, Vd,
+                initial_M=init_M, initial_Q=init_Q, initial_Delta=init_Delta)
+
+            # Keep result for warm-starting the next doping
+            if pt.result:
+                prev_result = pt.result
+
+            if best_pt is None or pt.score > best_pt.score:
+                best_pt = pt
+
+        assert best_pt is not None
+        print(f"     ↳ best: δ={best_pt.doping:.3f}  Δ={best_pt.Delta_total:.5f}"
+              f"  score={best_pt.score:.5f}"
+              f"  {'✓' if best_pt.converged else '⚠'}")
+        return best_pt
+
+    # --- physics-aware scout (no SCF, one BdG diag + cluster ED) ---
+
+    def _cheap_scout(self, doping: float, Delta_tetra: float,
+                     u: float, gJT: float) -> Dict:
+        """
+        Estimate the critical coupling λ_scout and the SC-JT viability score without a self-consistent loop using a single BdG diagonalization (at M₀, Q=0, Δ=0) plus one cluster ED step
+
+          1. Δ_CF from the full SOC+CF Hamiltonian (not a linear approximation).
+          2. Gutzwiller g_t, g_J at the given doping → t_eff, J_eff are
+             nonlinear in δ and vanish correctly at half-filling.
+          3. N₀ from the actual 2D band structure at (M₀, Q=0) via the
+             real BdG DOS, capturing van-Hove singularities and the
+             Fermi-surface reconstruction by M₀.
+          4. RPA Stoner factor 1/(1−U_eff·χ₀) computed with the real χ₀
+             formula (not N₀ as a proxy), so the near-instability
+             divergence is correctly included.
+          5. Magnetic suppression of the JT channel:
+             χ_τ ~ N₀/(1 + α_M·M₀²), where α_M = max(U/t_eff/2.35−1, 0).
+             High M₀ (strong AFM) closes the τ_x channel even when λ_BCS
+             looks large.
+          6. Cluster ED → self-consistent M₀ at Δ=Q=0, so we use a
+             physically motivated M₀ instead of a fixed guess.
+
+        Returns
+        -------
+        dict with:
+          'lambda_scout'  – effective coupling including RPA and τ_x suppression
+          'rpa_factor'    – Stoner enhancement
+          'chi_tau'       – multipolar susceptibility (JT channel open if > threshold)
+          'M0'            – cluster-ED equilibrium magnetisation
+          'Delta_CF'      – Γ₆–Γ₇ gap for this (Delta_tetra, gJT) point
+          'viable'        – bool: True if λ_scout > 0.15 AND χ_τ > 0.05 AND stoner_ok
+        """
+        p = self.solver.p
+
+        # --- 1. Build a temporary params copy with the trial material parameters ---
+        p2 = copy.copy(p)
+        p2.Delta_tetra = Delta_tetra
+        p2.u           = u
+        p2.g_JT        = gJT
+        p2.__post_init__()          # recomputes Delta_CF, U, U_mf, K_lattice
+
+        Delta_CF = max(p2.Delta_CF, 1e-4)
+
+        # --- 2. Gutzwiller factors ---
+        abs_d = max(abs(doping), 1e-6)
+        g_t   = (2.0 * abs_d) / (1.0 + abs_d)
+        g_J   = 4.0 / (1.0 + abs_d)**2
+        t_eff = g_t * p2.t0
+
+        # --- 3. Rough cluster-ED equilibrium M₀ at Q=0, Δ=0 ---
+        #   We iterate the 16×16 cluster a few times (cheap: no k-space).
+        #   This gives a physically consistent M₀ for the normal AFM state.
+        tx_bare = p2.t0          # Q=0 → no anisotropy
+        J_eff   = g_J * 4.0 * tx_bare**2 / p2.U * (abs_d / (abs_d + p2.doping_0))
+        mu_est  = 0.5 * Delta_CF - 2.0 * g_t * p2.t0 * np.tanh(doping / 0.1)
+
+        # Build a minimal RMFT_Solver-like cluster (no k-grid needed here)
+        H_sp  = np.zeros((4, 4), dtype=complex)
+        H_sp[2, 2] = Delta_CF; H_sp[3, 3] = Delta_CF   # CF on Γ₇
+        np.fill_diagonal(H_sp, H_sp.diagonal() - mu_est)
+
+        I4      = np.eye(4, dtype=complex)
+        O_sz    = np.diag(np.array([1.0, -1.0, p2.eta, -p2.eta]))
+        O_A_full = np.kron(O_sz, I4)
+        O_B_full = np.kron(I4, O_sz)
+        f_d  = abs_d / (abs_d + p2.doping_0)   # doping suppression factor (same as build_local_hamiltonian_for_bdg)
+        M0 = 0.35
+        for _ in range(12):
+            t2  = tx_bare**2
+            h6  = g_J * f_d * (p2.U_mf / 2.0 + p2.Z * 2.0 * t2 / p2.U) * M0 / 2.0
+            H_A = H_sp.copy()
+            H_A[0,0] -= h6;  H_A[1,1] += h6
+            H_A[2,2] -= p2.eta*h6;  H_A[3,3] += p2.eta*h6
+            H_B = H_sp.copy()
+            H_B[0,0] += h6;  H_B[1,1] -= h6
+            H_B[2,2] += p2.eta*h6;  H_B[3,3] -= p2.eta*h6
+            H_cl = (np.kron(H_A, I4) + np.kron(I4, H_B)
+                    + J_eff * np.kron(O_sz, O_sz))
+            ev, ec = eigh(H_cl)
+            bw  = np.exp(-np.clip(ev - ev[0], 0, 500) / max(p2.kT, 1e-10))
+            bw /= bw.sum()
+            mA_val = float(np.real(np.einsum('n,in,ij,jn->', bw, ec.conj(), O_A_full, ec)))
+            mB_val = float(np.real(np.einsum('n,in,ij,jn->', bw, ec.conj(), O_B_full, ec)))
+            M0_new = abs(mA_val - mB_val) / 2.0
+            if abs(M0_new - M0) < 1e-4:
+                M0 = M0_new; break
+            M0 = 0.6 * M0 + 0.4 * M0_new
+
+        # --- 4. χ₀(q_AFM) via analytic 2D tight-binding ---
+        #   χ₀ ≈ N₀ / (1 + (h_afm / (π·t_eff))²)
+        #   AFM gap (~h_afm) Lorentzian-broadens the q_AFM pole, weak AFM: χ₀→N₀; strong AFM: χ₀→0 (h_afm < bandwidth).
+        N0     = 1.0 / (np.pi * max(t_eff, 1e-6))
+        h_afm  = g_J * (p2.U_mf / 2.0 + p2.Z * 2.0 * tx_bare**2 / p2.U) * M0 / 2.0
+        chi0   = N0 / (1.0 + (h_afm / max(np.pi * t_eff, 1e-6))**2)
+
+        # --- 5. RPA Stoner factor ---
+        U_eff  = g_J * J_eff
+        stoner_denom = max(1.0 - U_eff * chi0, p2.rpa_cutoff)
+        rpa    = 1.0 / stoner_denom
+        stoner_ok = (stoner_denom > 0)
+
+        # --- 6. Pairing V_eff and λ_BCS ---
+        V_eff  = (p2.g_JT**2 / max(p2.K_lattice, 1e-9)) * rpa
+        lambda_bcs = V_eff * N0
+
+        # --- 7. τ_x channel suppression by AFM order ---
+        #   α_M = max(U/t_eff / 2.35 − 1, 0)  (2.35 = (U/t)_c on 2D square lattice)
+        Ut_ratio = p2.U / max(t_eff, 1e-6)
+        alpha_M  = max(Ut_ratio / 2.35 - 1.0, 0.0)
+        chi_tau  = N0 / (1.0 + alpha_M * M0**2)
+
+        # --- 8. Composite scout score ---
+        #   λ_scout = λ_BCS × (χ_τ / N₀)   → reduces to λ_BCS when AFM is weak,
+        #   is suppressed when strong AFM closes the τ_x channel.
+        lambda_scout = lambda_bcs * (chi_tau / max(N0, 1e-10))
+
+        viable = (lambda_scout > 0.15) and (chi_tau > 0.05 * N0) and stoner_ok
+
+        return {
+            'lambda_scout': lambda_scout,
+            'lambda_bcs':   lambda_bcs,
+            'rpa_factor':   rpa,
+            'chi_tau':      chi_tau,
+            'chi0':         chi0,
+            'M0':           M0,
+            'Delta_CF':     Delta_CF,
+            'h_afm':        h_afm,
+            'stoner_ok':    stoner_ok,
+            'viable':       viable,
+        }
+
+    def _adaptive_seed_near_critical(self, n_refine: int,
+                                     lambda_target: float = 1.0,
+                                     sigma_lambda:  float = 0.40) -> np.ndarray:
+        """
+        Generate n_refine normalised [0,1]³ material-space points biased biased using _cheap_scout evaluated at mid-doping (no full SCF).
+        Acceptance weight: w = w_lambda * w_viable,
+           w_lambda = exp(-(λ_scout-λ_target)^2 / (2σ^2)),
+           w_viable = 1 (viable) or 0.15 (non-viable).
+        Favors λ_scout≈1, open τ_x channel (χ_τ above threshold), and positive Stoner denominator (away from magnetic QCP)
+        """
+        rng          = np.random.default_rng(seed=7)
+        pts          = np.zeros((n_refine, 3))
+        accepted     = 0
+        max_tries    = n_refine * 800
+        # Use midpoint doping for the scout viability estimate
+        d_mid = 0.5 * (self.doping_bounds[0] + self.doping_bounds[1])
+
+        for _ in range(max_tries):
+            if accepted >= n_refine:
+                break
+            x = rng.uniform(size=3)
+            dt, u, g = self._denormalize(x)
+            scout = self._cheap_scout(d_mid, dt, u, g)
+
+            w_lam    = np.exp(-0.5 * ((scout['lambda_scout'] - lambda_target)
+                                       / sigma_lambda) ** 2)
+            w_viable = 1.0 if scout['viable'] else 0.15
+            w_total  = w_lam * w_viable
+
+            if rng.uniform() < w_total:
+                pts[accepted] = x
+                accepted += 1
+
+        if accepted < n_refine:
+            pts[accepted:] = rng.uniform(size=(n_refine - accepted, 3))
+        return pts
+
+    # --- BC diagnostics (6 extra BdG calls per point) ---
+
+    def _jt_coupling_strength(self, solver, result) -> dict:
+        """
+        Analytic JT feedback strength: lambda_JT = (g_eff^2/K) * chi_tau.
+
+        chi_tau is already in the converged SCF result dict (computed by
+        compute_static_chi0_afm every few iterations).  No new diagonalisation.
+
+        Physical interpretation
+        -----------------------
+        lambda_JT < 0.05  : JT channel closed (strong AFM or large Delta_CF)
+        lambda_JT in (0.05, 1.0) : SC-triggered regime (viable for cooperative loop)
+        lambda_JT >= 1.0  : spontaneous JT risk (alpha_K guard may be insufficient)
+
+        chi_tau already encodes the AFM suppression: it is small when M is large because BdG eigenvectors do not mix Gamma6-Gamma7 under strong spin order.
+        """
+        chi_tau   = result.get('chi_tau', 0.0)
+        K         = solver.p.K_lattice
+        lambda_JT = (solver.p.g_JT**2 / max(K, 1e-9)) * chi_tau
+
+        jt_viable = 0.05 < lambda_JT < 1.0
+        regime    = ('SC-triggered'     if jt_viable else
+                     ('spontaneous risk' if lambda_JT >= 1.0 else 'JT channel closed'))
+        return {
+            'lambda_JT': float(lambda_JT),
+            'chi_tau':   float(chi_tau),
+            'jt_viable': jt_viable,
+            'regime':    regime,
+        }
+
+    def _jt_causality_test(self, solver, result) -> dict:
+        """
+        Operational test of SC-triggered JT causality.
+
+        Runs a second SCF from initial_Delta=0 (normal-state fixpoint).
+        If Q->0 without SC but Q>0 with SC, the JT is SC-triggered (not spontaneous).
+
+        Cost: one extra SCF run (~same as a single BO evaluation).
+        Called only on top-N best points AFTER optimisation, not during.
+
+        Returns
+        -------
+        sc_triggered : bool   -- True if JT is caused by SC condensate
+        Q_normal     : float  -- JT distortion in normal-state fixpoint
+        Q_sc         : float  -- JT distortion in SC fixpoint
+        dQ           : float  -- SC-induced JT amplitude
+        Delta_sc     : float  -- SC gap at the tested fixpoint
+        """
+        doping = result.get('target_doping', 0.15)
+        M0     = result.get('M', 0.25)
+        Q_sc   = abs(result.get('Q', 0.0))
+        D_sc   = abs(result.get('Delta_s', 0.0)) + abs(result.get('Delta_d', 0.0))
+
+        if D_sc < 1e-4 or Q_sc < 1e-5:
+            return {'sc_triggered': False, 'Q_normal': 0.0, 'Q_sc': Q_sc,
+                    'Delta_sc': D_sc, 'dQ': 0.0, 'note': 'SC gap or Q too small to test'}
+
+        try:
+            normal_result = solver.solve_self_consistent(
+                target_doping=doping,
+                initial_M=M0, initial_Q=1e-5, initial_Delta=0.0,
+                verbose=False)
+            Q_normal = abs(normal_result.get('Q', 0.0))
+            D_normal = abs(normal_result.get('Delta_s', 0.0)) + abs(normal_result.get('Delta_d', 0.0))
+        except Exception as e:
+            return {'sc_triggered': False, 'Q_normal': float('nan'), 'Q_sc': Q_sc,
+                    'Delta_sc': D_sc, 'dQ': float('nan'), 'note': f'normal-state SCF failed: {e}'}
+
+        sc_triggered = (Q_normal < 0.5 * Q_sc) and (Q_sc > 1e-4) and (D_normal < 1e-3)
+        return {
+            'sc_triggered': sc_triggered,
+            'Q_normal':     float(Q_normal),
+            'Q_sc':         float(Q_sc),
+            'Delta_sc':     float(D_sc),
+            'dQ':           float(Q_sc - Q_normal),
+            'note':         ('CONFIRMED: JT is SC-triggered' if sc_triggered
+                             else 'WARNING: JT may be spontaneous'),
+        }
+
+    # --- scored objective ---
+
+    def _score(self, Delta: float, converged: bool, result: dict, solver) -> float:
+        """
+        Physically motivated score — four analytic factors, no numeric derivatives.
+
+        score = Delta * rpa_f * jt_f * stoner_f * lam_f
+
+        rpa_f : RPA spin-fluctuation enhancement window factor.
+        jt_f  : lambda_JT = (g_eff^2/K)*chi_tau window factor
+                  < 0.05          -> JT channel closed     -> 0.10
+                  in [0.05, 1.0)  -> SC-triggered regime   -> smooth peak at 0.65
+                  >= 1.0          -> spontaneous JT risk    -> 0.30
+        stoner_f: AFM stability (0.20 if Stoner unstable)
+        lam_f   : gap-equation eigenvalue penalty (lambda_max > 2 penalised)
+        """
+        if Delta < 1e-8:
+            return 0.0
+        conv_f = 1.0 if converged else 0.10
+
+        # --- RPA factor: central to the hypothesis ---
+        rpa_val = result.get('rpa_factor', 1.0) if result else 1.0
+        rpa_cutoff_inv = 1.0 / max(solver.p.rpa_cutoff, 0.05)   # max enhancement
+        if rpa_val < 2.0:
+            rpa_f = float(np.clip(rpa_val / 2.0, 0.5, 1.0))   # mild enhancement
+        else:
+            rpa_f = 1.0   # optimal range; already at max physically useful level
+
+        # --- lambda_JT: analytic, from chi_tau already in result ---
+        chi_tau   = result.get('chi_tau', 0.0) if result else 0.0
+        lambda_JT = (solver.p.g_JT**2 / max(solver.p.K_lattice, 1e-9)) * chi_tau
+
+        if lambda_JT < 0.05:
+            jt_f = 0.10
+        elif lambda_JT >= 1.0:
+            jt_f = 0.30
+        else:
+            # Smooth bell peaked at lambda_JT ~ 0.65; range [0.30, 1.0]
+            jt_f = float(np.clip(1.0 - 0.8 * ((lambda_JT - 0.65) / 0.65)**2, 0.30, 1.0))
+
+        # --- Stoner stability ---
+        stoner_ok = not (result.get('afm_unstable', False) if result else False)
+        stoner_f  = 1.0 if stoner_ok else self.W_STONER_BAD
+
+        # --- Gap-equation eigenvalue penalty ---
+        lambda_max = result.get('lambda_max', 0.0) if result else 0.0
+        lam_f      = float(np.clip(1.0 - 0.15 * max(0.0, lambda_max - 2.0), 0.05, 1.0))
+
+        return Delta * conv_f * rpa_f * jt_f * stoner_f * lam_f
+
+    # --- GP ---
+
+    def _fit_gp(self):
         if not _SKLEARN_AVAILABLE or self._gp is None or len(self.observations) < 3:
             return
-        X = np.array([self._normalize(o.doping, o.alpha_K, o.channel_mix)
+        X = np.array([self._normalize(o.Delta_tetra, o.u, o.g_JT)
                       for o in self.observations])
-        y = np.array([o.Delta_total for o in self.observations])
+        y = np.array([o.score for o in self.observations])
         with warnings.catch_warnings():
             warnings.simplefilter("ignore")
             self._gp.fit(X, y)
 
-    def _expected_improvement(self, X_cand: np.ndarray, xi: float = 0.01) -> np.ndarray:
-        """Expected Improvement acquisition function (vectorised)."""
+    def _expected_improvement(self, X_cand, xi=0.01):
         if not _SKLEARN_AVAILABLE or self._gp is None:
             return np.random.rand(len(X_cand))
         from scipy.stats import norm
-        y_best = max(o.Delta_total for o in self.observations)
+        y_best = max(o.score for o in self.observations)
         mu, sigma = self._gp.predict(X_cand, return_std=True)
         sigma = np.maximum(sigma, 1e-9)
         z  = (mu - y_best - xi) / sigma
         EI = (mu - y_best - xi) * norm.cdf(z) + sigma * norm.pdf(z)
         return np.maximum(EI, 0.0)
 
-    def _next_point_via_EI(self, n_restarts: int = 50) -> Tuple[float, float, float]:
-        """Select next candidate by maximising EI over a random grid."""
+    def _next_point_via_EI(self, n_restarts=50):
         rng  = np.random.default_rng()
-        cand = rng.uniform(size=(n_restarts * 200, 3))
-        # Enforce alpha_K hard constraint in normalised space
-        alpha_max_n = ((self.alpha_K_hard_max - self.alpha_bounds[0])
-                       / (self.alpha_bounds[1]  - self.alpha_bounds[0]))
-        cand[:, 1] = np.clip(cand[:, 1], 0.0, alpha_max_n)
-        EI = self._expected_improvement(cand)
+        cand = rng.uniform(size=(n_restarts * 200, 3))   # 3D material space
+        EI   = self._expected_improvement(cand)
         return self._denormalize(cand[np.argmax(EI)])
 
-    # ------------------------------------------------------------------
-    # Evaluation
-    # ------------------------------------------------------------------
+    # --- evaluation ---
 
-    def _evaluate_point(self, doping: float, alpha: float, mix: float) -> OptimPoint:
-        """Evaluate a single point via run_scf_fast."""
-        alpha = self._clip_alpha(alpha)
-        t0 = time.time()
+    def _evaluate_point(self, doping, Delta_tetra, u, gJT, Vs: float = 1.0, Vd: float = 1.0,
+                         initial_M: float = 0.25,
+                         initial_Q: float = 1e-4,
+                         initial_Delta: float = 0.04):
+        t0 = _time.time()
         try:
-            result    = run_scf_fast(self.solver, doping, alpha, mix, verbose=False)
+            result    = run_scf_material(self.solver, doping, Delta_tetra, u, gJT, Vs, Vd,
+                                          initial_M=initial_M, initial_Q=initial_Q,
+                                          initial_Delta=initial_Delta, verbose=False)
             Delta     = result.get('Delta_s', 0.0) + result.get('Delta_d', 0.0)
             converged = result.get('converged', False)
-            if not converged:
-                Delta *= 0.5   # 50% penalty for non-converged runs
         except Exception as e:
-            print(f"    SCF error ({doping:.3f}, {alpha:.3f}, {mix:.3f}): {e}")
-            result, Delta, converged = None, 0.0, False
-        print(f"    δ={doping:.3f} α={alpha:.3f} mix={mix:.2f} "
-              f"→ Δ={Delta:.5f} eV  {'✓' if converged else '⚠'}  ({time.time()-t0:.1f}s)")
-        return OptimPoint(doping, alpha, mix, Delta, converged, result)
+            print(f"    SCF error: {e}")
+            result, Delta, converged = {}, 0.0, False
 
-    def _evaluate_batch(self,
-                        points: List[Tuple[float, float, float]]) -> List[OptimPoint]:
-        """Batch evaluation: parallel if n_workers > 1, sequential otherwise."""
+        # Analytic JT diagnostics from SCF result dict (no extra diagonalisation)
+        jt_diag    = self._jt_coupling_strength(self.solver, result) if result else {}
+        lambda_JT  = jt_diag.get("lambda_JT", 0.0)
+        lambda_max = result.get("lambda_max", 0.0) if result else 0.0
+        stoner_ok  = not (result.get("afm_unstable", False) if result else False)
+
+        score   = self._score(Delta, converged, result, self.solver)
+        regime  = jt_diag.get("regime", "n/a")
+        print(f"    delta={doping:.3f} Dt={Delta_tetra:.3f} u={u:.2f} g={gJT:.3f} "
+              f"-> Delta={Delta:.5f} score={score:.5f} lJT={lambda_JT:.3f}[{regime}] "
+              f"{"ok" if converged else "WARN"} ({_time.time()-t0:.1f}s)")
+        return OptimPoint(doping, Delta_tetra, u, gJT, Delta, converged, result,
+                          V_s_scale=Vs, V_d_scale=Vd,
+                          lambda_JT=lambda_JT, lambda_max=lambda_max,
+                          stoner_ok=stoner_ok, score=score)
+
+    def _evaluate_batch(self, points):
+        """
+        Evaluate a list of (Delta_tetra, u, gJT) material points, each with
+        an inner doping scan.  Falls back to sequential evaluation unless
+        n_workers > 1.  (Parallelism over materials; inner doping scan is
+        always sequential for warm-starting consistency.)
+        """
         if self.n_workers <= 1 or len(points) == 1:
-            return [self._evaluate_point(d, a, m) for d, a, m in points]
-
+            return [self._evaluate_material(*p) for p in points]
+        # Parallel path: each worker runs the full inner doping scan for one material.
         results = []
         with concurrent.futures.ProcessPoolExecutor(max_workers=self.n_workers) as ex:
-            futs = {ex.submit(run_scf_fast, self.solver, d, a, m,
-                              0.25, 1e-4, 0.04, False): (d, a, m)
-                    for d, a, m in points}
+            futs = {ex.submit(self._evaluate_material, *p): p for p in points}
             for fut in concurrent.futures.as_completed(futs):
-                d, a, m = futs[fut]
+                dt, u, g = futs[fut]
                 try:
-                    res   = fut.result()
-                    Delta = res.get('Delta_s', 0.0) + res.get('Delta_d', 0.0)
-                    conv  = res.get('converged', False)
-                    if not conv:
-                        Delta *= 0.5
-                    pt = OptimPoint(d, a, m, Delta, conv, res)
+                    pt = fut.result()
                 except Exception as e:
-                    print(f"    Parallel error ({d:.3f},{a:.3f},{m:.3f}): {e}")
-                    pt = OptimPoint(d, a, m, 0.0, False, None)
+                    p_err = futs[fut]
+                    print(f"    Parallel error for params={p_err}: {e}")
+                    pt = OptimPoint(
+                        doping=float(0.5*(self.doping_bounds[0]+self.doping_bounds[1])),
+                        Delta_tetra=p_err[0], u=p_err[1], g_JT=p_err[2],
+                        Delta_total=0.0, converged=False, score=0.0)
                 results.append(pt)
-                print(f"    δ={d:.3f} α={a:.3f} mix={m:.2f} → Δ={pt.Delta_total:.5f}")
         return results
 
-    # ------------------------------------------------------------------
-    # Main loop
-    # ------------------------------------------------------------------
+    # --- progress bar ---
 
-    def optimize(self, n_initial: int = 12, n_iterations: int = 35,
-                 verbose: bool = True) -> Dict:
+    @staticmethod
+    def _progress_bar(done, total, elapsed_s, width=40, prefix=""):
+        frac   = done / max(total, 1)
+        filled = int(width * frac)
+        bar    = "█" * filled + "░" * (width - filled)
+        pct    = int(100 * frac)
+        if done > 0 and elapsed_s > 0:
+            eta_s = elapsed_s / done * (total - done)
+            h, r  = divmod(int(eta_s), 3600)
+            m, s  = divmod(r, 60)
+            eta   = f"ETA {h}:{m:02d}:{s:02d}"
+        else:
+            eta = "ETA --:--:--"
+        return f"\r{prefix}[{bar}] {done}/{total} {pct}% {int(elapsed_s//60)}m{int(elapsed_s%60):02d}s {eta}  "
+
+    # --- main loop ---
+
+    def optimize(self, n_initial=12, n_iterations=35, n_refine=-1, verbose=True):
         """
-        Run Bayesian optimisation.
+        Three-phase Bayesian optimisation over the 3D material space.
 
-        Phase 1: LHS seed evaluation (n_initial points).
-        Phase 2: GP-guided EI maximisation (n_iterations evaluations).
+        Phase 1a — LHS seeding (n_initial material points).
+        Phase 1b — Adaptive seeding near the SC critical manifold (n_refine points).
+        Phase 2  — GP Expected Improvement (n_iterations acquisitions).
 
-        Returns dict with 'best_point', 'observations', 'gp', 'elapsed_s'.
+        Each material evaluation calls _evaluate_material which runs an inner
+        doping scan (n_doping_scan SCF calculations) and returns the best δ.
+        The GP is fitted on per-material best scores (3D input, scalar output).
         """
-        t_start = time.time()
+        if n_refine < 0:
+            n_refine = max(0, n_initial // 3)
+        total_mat  = n_initial + n_refine + n_iterations
+        t_start    = _time.time()
+
         print(f"\n{'='*70}")
-        print(f"BAYESIAN OPTIMISATION  (seed={n_initial}  BO-iters={n_iterations})")
-        print(f"  Total SCF runs: {n_initial + n_iterations}")
+        print(f"PHASE 1 — BAYESIAN OPTIMISATION  (3D material space, V_s=V_d=1 fixed)")
+        print(f"  seed={n_initial}  adapt={n_refine}  BO={n_iterations}")
+        print(f"  Per-material doping scan: {self.n_doping_scan} points")
+        print(f"  Total SCF runs (≤): {total_mat * self.n_doping_scan}")
+        print(f"  Space: (Delta_tetra, u, g_JT)  |  Objective: max_δ scored Δ")
         print(f"{'='*70}")
 
-        # Phase 1: Latin Hypercube seed
-        print(f"\n[Phase 1] Latin Hypercube seeding ({n_initial} points)")
-        initial_pts = [(d, self._clip_alpha(a), m)
-                       for d, a, m in (self._denormalize(x)
-                                       for x in self._lhs_sample(n_initial))]
-        self.observations.extend(self._evaluate_batch(initial_pts))
+        def _tick(done, prefix="BO "):
+            sys.stdout.write(
+                self._progress_bar(done, total_mat, _time.time() - t_start, prefix=prefix))
+            sys.stdout.flush()
 
-        # Phase 2: BO iterations
-        print(f"\n[Phase 2] Bayesian iterations ({n_iterations} steps)")
+        # Phase 1a: LHS over 3D material space
+        print(f"\n[Phase 1a] LHS material seeding ({n_initial} materials)")
+        lhs_pts = [self._denormalize(x) for x in self._lhs_sample(n_initial)]
+        for idx, pt3 in enumerate(lhs_pts):
+            _tick(idx, "Seed ")
+            self.observations.append(self._evaluate_material(*pt3))
+        _tick(n_initial, "Seed ")
+        print()
+
+        # Phase 1b: adaptive near critical manifold
+        if n_refine > 0:
+            print(f"\n[Phase 1b] Adaptive seeding near λ_eff≈1 ({n_refine} materials)")
+            adp_pts = [self._denormalize(x)
+                       for x in self._adaptive_seed_near_critical(n_refine)]
+            for idx, pt3 in enumerate(adp_pts):
+                _tick(n_initial + idx, "Adapt")
+                self.observations.append(self._evaluate_material(*pt3))
+            _tick(n_initial + n_refine, "Adapt")
+            print()
+
+        seed_done = n_initial + n_refine
+
+        # Phase 2: GP-guided EI over 3D material space
+        print(f"\n[Phase 2] GP EI iterations ({n_iterations} material trials)")
         for i in range(n_iterations):
             self._fit_gp()
-            d, a, m = self._next_point_via_EI(n_restarts=30)
-            a = self._clip_alpha(a)
-            print(f"\n  [BO iter {i+1}/{n_iterations}] candidate: "
-                  f"δ={d:.3f}  α={a:.3f}  mix={m:.2f}")
-            self.observations.append(self._evaluate_point(d, a, m))
+            dt, u, g = self._next_point_via_EI(n_restarts=30)
+            _tick(seed_done + i, "BO   ")
+            print(f"\n  [BO {i+1}/{n_iterations}] Δ_tet={dt:.3f}  u={u:.2f}  g={g:.3f}")
+            self.observations.append(self._evaluate_material(dt, u, g))
+            _tick(seed_done + i + 1, "BO   ")
 
             if verbose and (i + 1) % 5 == 0:
-                best = max(self.observations, key=lambda o: o.Delta_total)
-                print(f"\n  ── best so far: δ={best.doping:.3f}  α={best.alpha_K:.3f}  "
-                      f"mix={best.channel_mix:.2f}  Δ={best.Delta_total:.5f} eV ──\n")
+                best_s = max(self.observations, key=lambda o: o.score)
+                print(f"\n  -- best score so far: {best_s}  --\n")
+        print()
 
-        best    = max(self.observations, key=lambda o: o.Delta_total)
-        elapsed = time.time() - t_start
+        best       = max(self.observations, key=lambda o: o.score)
+        best_raw   = max(self.observations, key=lambda o: o.Delta_total)
+        valid      = [o for o in self.observations if o.converged and o.lambda_JT > 0.0]
+        best_valid = max(valid, key=lambda o: o.score) if valid else best
+        elapsed    = _time.time() - t_start
 
         print(f"\n{'='*70}")
-        print(f"OPTIMISATION COMPLETE  ({elapsed/60:.1f} min)")
-        print(f"  GLOBAL OPTIMUM:")
-        print(f"    doping δ    = {best.doping:.4f}")
-        print(f"    alpha_K     = {best.alpha_K:.4f}  (hard max: {self.alpha_K_hard_max:.3f})")
-        print(f"    channel_mix = {best.channel_mix:.4f}")
-        print(f"    Δ_max       = {best.Delta_total:.6f} eV")
-        print(f"    Converged   = {best.converged}")
+        print(f"DONE ({elapsed/60:.1f} min)  |  Scored best: {best}")
+        if best_raw is not best:
+            print(f"Raw Δ champion: {best_raw}")
+        print(f"Optimal doping: δ = {best.doping:.4f}")
         print(f"{'='*70}\n")
 
-        return {'best_point':   best,
-                'observations': self.observations,
-                'gp':           self._gp,
-                'elapsed_s':    elapsed}
+        return {'best_point': best, 'best_valid': best_valid, 'best_raw': best_raw,
+                'observations': self.observations, 'gp': self._gp, 'elapsed_s': elapsed}
 
-def plot_optimization_results(opt_result: Dict, ax_progress=None, ax_doping=None,
-                               ax_alpha=None, ax_mix=None) -> None:
+class ChannelOptimizer:
     """
-    Bayesian optimisation summary panels.
+    Phase 2: 2D grid + GP search over (V_s_scale, V_d_scale) with fixed material
+    point (Delta_tetra*, u*, g_JT*) and optimal doping δ*.
 
-    Can be called standalone (creates its own figure) OR embedded into
-    plot_phase_diagrams by passing pre-created axes.  When axes are supplied
-    no new figure is created and plt.show() is not called.
+    Rationale for two-stage architecture
+    ─────────────────────────────────────
+    In Phase 1 (BayesianOptimizer) V_s_scale = V_d_scale = 1.0 are held fixed.
+    This keeps the GP in a well-conditioned 3D space: with O(200) evaluations a
+    3D GP fits accurately, whereas a 5D GP would be severely under-sampled.
 
-    Panels:
-      ax_progress : Δ vs evaluation index + running best
-      ax_doping   : doping δ vs Δ (scatter, green=converged / red=failed)
-      ax_alpha    : alpha_K vs Δ
-      ax_mix      : channel_mix vs Δ
+    The two scale parameters are intentionally excluded from Phase 1 because:
+      1. Degeneracy: λ_eff ∝ V_scale × α_K × Δ_CF, so V_scale and α_K are
+         partially collinear → the GP cannot resolve them independently.
+      2. Separability: V_scale shifts the BCS coupling strength λ uniformly
+         across all (Δ_tet, u, g_JT) combinations.  The optimal *material*
+         (phase-boundary topology, optimal-doping position) is V_scale-independent;
+         only the amplitude of Δ changes.
+      3. Smoothness: Δ(V_s, V_d) is a smooth, nearly monotone 2D surface.
+         A coarse 5×5 grid (25 SCF) resolves the optimum; a GP with ~20 points
+         suffices for sub-grid refinement.
+
+    Search strategy
+    ───────────────
+    Step A: 5×5 uniform grid over [Vs_lo, Vs_hi] × [Vd_lo, Vd_hi]
+    Step B: GP-guided EI refinement (n_refine ≈ 15 points) around the best grid cell
+    Step C: Return argmax (V_s*, V_d*) and corresponding Δ_total, Δ_s, Δ_d
+
+    Typical cost: (25 + 15) × 1 SCF = 40 SCF runs — negligible vs Phase 1.
     """
-    obs       = opt_result['observations']
-    deltas    = [o.Delta_total for o in obs]
-    dopings   = [o.doping      for o in obs]
-    alphas    = [o.alpha_K     for o in obs]
-    mixes     = [o.channel_mix for o in obs]
-    converged = [o.converged   for o in obs]
-    colours   = ['g' if c else 'r' for c in converged]
-    running   = np.maximum.accumulate(deltas)
 
-    standalone = ax_progress is None
-    if standalone:
-        fig, axes = plt.subplots(2, 2, figsize=(12, 9))
-        fig.suptitle('Bayesian Optimisation — AFM-SC-JT Model', fontsize=13, fontweight='bold')
-        ax_progress, ax_doping, ax_alpha, ax_mix = (
-            axes[0, 0], axes[0, 1], axes[1, 0], axes[1, 1])
+    def __init__(self, solver: 'RMFT_Solver',
+                 best_material: 'OptimPoint',
+                 Vs_bounds: Tuple[float, float] = (0.1, 2.5),
+                 Vd_bounds: Tuple[float, float] = (0.1, 2.5),
+                 n_grid:    int = 5,
+                 n_refine:  int = 15):
+        """
+        Parameters
+        ----------
+        solver        : base RMFT_Solver (will be shallow-copied per trial)
+        best_material : OptimPoint from Phase 1 (carries Delta_tetra, u, g_JT, doping)
+        Vs_bounds     : search range for V_s_scale
+        Vd_bounds     : search range for V_d_scale
+        n_grid        : side of the initial uniform grid (n_grid² evaluations)
+        n_refine      : GP EI refinement points after the grid
+        """
+        self.solver        = solver
+        self.mat           = best_material
+        self.Vs_bounds     = Vs_bounds
+        self.Vd_bounds     = Vd_bounds
+        self.n_grid        = n_grid
+        self.n_refine      = n_refine
+        self.observations: List[Tuple[float, float, float, Dict]] = []
+        # (V_s, V_d, score, result_dict)
 
-    ax_progress.plot(deltas, 'o', alpha=0.5, color='steelblue', markersize=5, label='Δ (eV)')
-    ax_progress.plot(running, 'r-', linewidth=2, label='Best so far')
-    ax_progress.set_xlabel('Evaluation index'); ax_progress.set_ylabel('Δ_total (eV)')
-    ax_progress.set_title('Optimisation progress'); ax_progress.legend(fontsize=9)
-    ax_progress.grid(True, alpha=0.3)
+        self._gp = None
+        if _SKLEARN_AVAILABLE:
+            kernel = (ConstantKernel(1.0, (1e-3, 1e3))
+                      * Matern(length_scale=[0.5, 0.5], nu=2.5)
+                      + WhiteKernel(noise_level=1e-4, noise_level_bounds=(1e-6, 0.1)))
+            self._gp = GaussianProcessRegressor(
+                kernel=kernel, alpha=1e-6,
+                n_restarts_optimizer=5, normalize_y=True)
 
-    best_idx = int(np.argmax(deltas))
-    plot_targets = [(ax_doping, dopings, 'Doping δ'),
-                    (ax_alpha,  alphas,  'alpha_K')]
-    if ax_mix is not None:
-        plot_targets.append((ax_mix, mixes, 'channel_mix'))
-    for ax, xs, label in plot_targets:
-        ax.scatter(xs, deltas, c=colours, s=40, alpha=0.7)
-        ax.axvline(xs[best_idx], color='gold', linewidth=1.5, linestyle='--', label='optimum')
-        ax.set_xlabel(label); ax.set_ylabel('Δ_total (eV)')
-        ax.set_title(f'{label} vs Gap'); ax.grid(True, alpha=0.3); ax.legend(fontsize=8)
+        print(f"  ChannelOptimizer (2D channel space):")
+        print(f"    V_s ∈ {Vs_bounds},  V_d ∈ {Vd_bounds}")
+        print(f"    grid={n_grid}×{n_grid}={n_grid**2},  GP refine={n_refine}")
+        print(f"    fixed: Δ_tet={best_material.Delta_tetra:.3f}  u={best_material.u:.2f}"
+              f"  g_JT={best_material.g_JT:.3f}  δ={best_material.doping:.3f}")
 
-    if standalone:
-        plt.tight_layout()
-        plt.show()
+    # ------------------------------------------------------------------
+    def _normalize_ch(self, vs, vd):
+        return np.array([
+            (vs - self.Vs_bounds[0]) / (self.Vs_bounds[1] - self.Vs_bounds[0]),
+            (vd - self.Vd_bounds[0]) / (self.Vd_bounds[1] - self.Vd_bounds[0]),
+        ])
+
+    def _denormalize_ch(self, x):
+        vs = self.Vs_bounds[0] + x[0] * (self.Vs_bounds[1] - self.Vs_bounds[0])
+        vd = self.Vd_bounds[0] + x[1] * (self.Vd_bounds[1] - self.Vd_bounds[0])
+        return float(vs), float(vd)
+
+    # ------------------------------------------------------------------
+    def _run_scf(self, vs: float, vd: float) -> Tuple[float, Dict]:
+        """Single SCF at fixed material point, given (V_s_scale, V_d_scale)."""
+        mat = self.mat
+        result = run_scf_material(
+            self.solver,
+            target_doping = mat.doping,
+            Delta_tetra   = mat.Delta_tetra,
+            u             = mat.u,
+            g_JT          = mat.g_JT,
+            V_s_scale     = vs,
+            V_d_scale     = vd,
+            initial_M     = 0.25,
+            initial_Q     = 1e-4,
+            initial_Delta = 0.04,
+            verbose       = False,
+        )
+        if result.get('converged', False):
+            ds = abs(result.get('Delta_s', 0.0))
+            dd = abs(result.get('Delta_d', 0.0))
+            score = ds + dd
+        else:
+            score = 0.0
+        return score, result
+
+    # ------------------------------------------------------------------
+    def _fit_gp_ch(self):
+        if not _SKLEARN_AVAILABLE or self._gp is None or len(self.observations) < 4:
+            return
+        X = np.array([self._normalize_ch(vs, vd)
+                      for vs, vd, _, _ in self.observations])
+        y = np.array([s for _, _, s, _ in self.observations])
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            self._gp.fit(X, y)
+
+    def _EI_ch(self, X_cand, xi=0.01):
+        if not _SKLEARN_AVAILABLE or self._gp is None or len(self.observations) < 4:
+            return np.random.rand(len(X_cand))
+        from scipy.stats import norm
+        y_best = max(s for _, _, s, _ in self.observations)
+        mu, sigma = self._gp.predict(X_cand, return_std=True)
+        sigma = np.maximum(sigma, 1e-9)
+        z  = (mu - y_best - xi) / sigma
+        return np.maximum((mu - y_best - xi) * norm.cdf(z) + sigma * norm.pdf(z), 0.0)
+
+    def _next_ch(self):
+        rng  = np.random.default_rng()
+        cand = rng.uniform(size=(5000, 2))
+        EI   = self._EI_ch(cand)
+        return self._denormalize_ch(cand[np.argmax(EI)])
+
+    # ------------------------------------------------------------------
+    def optimize(self) -> Dict:
+        """
+        Run grid search + GP refinement.
+
+        Returns dict with keys:
+          V_s_scale, V_d_scale  : optimal channel scales
+          Delta_s, Delta_d      : corresponding gap components
+          Delta_total           : Δ_s + Δ_d
+          score                 : same as Delta_total for channel opt
+          result                : full SCF result dict
+          grid_obs              : all (Vs, Vd, score) observations
+        """
+        t0 = _time.time()
+        n  = self.n_grid
+        total = n*n + self.n_refine
+
+        print(f"\n{'='*60}")
+        print(f"PHASE 2 — CHANNEL STRENGTH OPTIMISATION (2D)")
+        print(f"{'='*60}")
+
+        # ── Step A: uniform grid ──────────────────────────────────────
+        print(f"\n[Phase 2a] {n}×{n} uniform grid ...")
+        vs_grid = np.linspace(*self.Vs_bounds, n)
+        vd_grid = np.linspace(*self.Vd_bounds, n)
+        done = 0
+        for vs in vs_grid:
+            for vd in vd_grid:
+                score, res = self._run_scf(vs, vd)
+                self.observations.append((vs, vd, score, res))
+                done += 1
+                pct = done / total * 100
+                sys.stdout.write(f"\r  grid [{done}/{n*n}]  Vs={vs:.2f}  Vd={vd:.2f}"
+                                 f"  Δ={score:.5f}  [{pct:.0f}%]   ")
+                sys.stdout.flush()
+        print()
+
+        # ── Step B: GP EI refinement ──────────────────────────────────
+        print(f"\n[Phase 2b] GP EI refinement ({self.n_refine} points) ...")
+        for i in range(self.n_refine):
+            self._fit_gp_ch()
+            vs, vd = self._next_ch()
+            score, res = self._run_scf(vs, vd)
+            self.observations.append((vs, vd, score, res))
+            done += 1
+            pct = done / total * 100
+            sys.stdout.write(f"\r  GP [{i+1}/{self.n_refine}]  Vs={vs:.2f}  Vd={vd:.2f}"
+                             f"  Δ={score:.5f}  [{pct:.0f}%]   ")
+            sys.stdout.flush()
+        print()
+
+        # ── Step C: extract best ──────────────────────────────────────
+        best_obs = max(self.observations, key=lambda o: o[2])
+        vs_opt, vd_opt, score_opt, res_opt = best_obs
+
+        elapsed = _time.time() - t0
+        print(f"\n{'='*60}")
+        print(f"Channel optimum found ({elapsed:.1f}s):")
+        print(f"  V_s_scale = {vs_opt:.4f}   V_d_scale = {vd_opt:.4f}")
+        ds = abs(res_opt.get('Delta_s', 0.0)) if res_opt else 0.0
+        dd = abs(res_opt.get('Delta_d', 0.0)) if res_opt else 0.0
+        print(f"  Δ_s = {ds:.6f} eV   Δ_d = {dd:.6f} eV   |Δ| = {ds+dd:.6f} eV")
+        print(f"{'='*60}\n")
+
+        return {
+            'V_s_scale':   vs_opt,
+            'V_d_scale':   vd_opt,
+            'Delta_s':     ds,
+            'Delta_d':     dd,
+            'Delta_total': ds + dd,
+            'score':       score_opt,
+            'result':      res_opt,
+            'grid_obs':    self.observations,
+            'elapsed_s':   elapsed,
+        }
 
 def full_bayesian_optimize(solver: 'RMFT_Solver',
-                            doping_bounds:    Tuple[float, float] = (0.12, 0.28),
-                            alpha_bounds:     Tuple[float, float] = (1.05, 3.5),
-                            mix_bounds:       Tuple[float, float] = (0.0,  1.0),
-                            n_initial:        int   = 15,
-                            n_iterations:     int   = 40,
-                            n_workers:        int   = 1,
-                            alpha_K_hard_max: Optional[float] = None) -> Dict:
+                            doping_bounds:      Tuple[float, float] = (0.08, 0.30),
+                            Delta_tetra_bounds: Tuple[float, float] = (-0.30, -0.05),
+                            u_bounds:           Tuple[float, float] = (4.0, 8.0),
+                            gJT_bounds:         Tuple[float, float] = (0.4, 1.2),
+                            Vs_bounds:          Tuple[float, float] = (0.1, 2.5),
+                            Vd_bounds:          Tuple[float, float] = (0.1, 2.5),
+                            n_doping_scan:      int = 5,
+                            n_initial:          int = 15,
+                            n_refine:           int = -1,
+                            n_iterations:       int = 40,
+                            n_ch_grid:          int = 5,
+                            n_ch_refine:        int = 15,
+                            n_workers:          int = 1) -> Dict:
     """
-    Convenience wrapper: create BayesianOptimizer, run, optionally plot.
+    Two-stage material + channel optimisation.
 
-    Returns dict with keys: 'best', 'Delta', 'doping', 'alpha_K',
-    'channel_mix', 'result', 'all_obs', 'elapsed_s'.
+    ╔══════════════════════════════════════════════════════════════════════╗
+    ║  Stage 1 — BayesianOptimizer (3D material space)                     ║
+    ║    Parameters: (Δ_tet, u, g_JT)   V_s_scale = V_d_scale = 1          ║
+    ║    Inner scan: n_doping_scan dopings per material trial              ║
+    ║    Budget:    n_initial LHS + n_refine adaptive + n_iterations EI    ║
+    ║                                                                      ║
+    ║  Stage 2 — ChannelOptimizer (2D channel space)                       ║
+    ║    Parameters: (V_s_scale, V_d_scale)   material fixed to Stage 1    ║
+    ║    Grid:       n_ch_grid² uniform + n_ch_refine GP-EI points         ║
+    ╚══════════════════════════════════════════════════════════════════════╝
+
+    Two-stage rationale
+    ───────────────────
+    λ_eff ∝ V_scale × α_K × Δ_CF  →  V_scale and α_K are partially collinear.
+    A 5D GP with O(200) points cannot resolve this degeneracy.  Factoring into
+    a 3D material search (O(200) evaluations, well-conditioned GP) followed by a
+    2D channel search (~40 SCF, smooth surface, grid+GP sufficient) gives:
+      • Phase 1: high-quality material space coverage
+      • Phase 2: exact channel-strength optimum at negligible extra cost
+
+    Parameters
+    ----------
+    doping_bounds      : inner doping scan range (NOT a BO dimension)
+    Delta_tetra_bounds : Stage 1 BO range for tetragonal CF (eV)
+    u_bounds           : Stage 1 BO range for U/t0 ratio
+    gJT_bounds         : Stage 1 BO range for e-ph coupling (eV/Å)
+    Vs_bounds          : Stage 2 search range for V_s_scale
+    Vd_bounds          : Stage 2 search range for V_d_scale
+    n_doping_scan      : doping grid points per material (5 recommended)
+    n_initial          : Stage 1 LHS seed materials
+    n_refine           : Stage 1 adaptive seeds near λ_eff≈1  (−1 → auto)
+    n_iterations       : Stage 1 GP EI acquisitions
+    n_ch_grid          : Stage 2 grid side (n_ch_grid² evaluations)
+    n_ch_refine        : Stage 2 GP EI refinement points
+    n_workers          : parallel workers for the inner doping scan
     """
+    t0_total = _time.time()
+
+    # ─────────────────────────────────────────────────────────────────────
+    # STAGE 1: material search (V_s = V_d = 1 fixed)
+    # ─────────────────────────────────────────────────────────────────────
     opt = BayesianOptimizer(solver,
                              doping_bounds=doping_bounds,
-                             alpha_bounds=alpha_bounds,
-                             mix_bounds=mix_bounds,
-                             alpha_K_hard_max=alpha_K_hard_max,
+                             Delta_tetra_bounds=Delta_tetra_bounds,
+                             u_bounds=u_bounds,
+                             gJT_bounds=gJT_bounds,
+                             n_doping_scan=n_doping_scan,
                              n_workers=n_workers)
-    opt_result = opt.optimize(n_initial=n_initial, n_iterations=n_iterations, verbose=True)
-    # Note: plot_optimization_results is now embedded inside plot_phase_diagrams.
-    # Call it standalone here only if you want an immediate preview without the phase diagram.
-    best = opt_result['best_point']
-    return {'best':        best,
-            'Delta':       best.Delta_total,
-            'doping':      best.doping,
-            'alpha_K':     best.alpha_K,
-            'channel_mix': best.channel_mix,
-            'result':      best.result,
-            'all_obs':     opt_result['observations'],
-            'elapsed_s':   opt_result['elapsed_s']}
+    res1  = opt.optimize(n_initial=n_initial, n_refine=n_refine,
+                         n_iterations=n_iterations, verbose=True)
+    best1 = res1['best_valid'] or res1['best_point']
 
+    # SC-triggered JT causality test on top-5 Stage 1 points
+    all_obs_sorted = sorted(res1['observations'], key=lambda o: o.score, reverse=True)
+    causality_results = []
+    print('\nSC-triggered JT causality test (Stage 1 top-5 points)...')
+    for top_pt in all_obs_sorted[:5]:
+        if top_pt.result and top_pt.converged:
+            s = copy.copy(solver)
+            s.p = copy.copy(solver.p)
+            s.p.Delta_tetra = top_pt.Delta_tetra
+            s.p.u           = top_pt.u
+            s.p.g_JT        = top_pt.g_JT
+            s.p.__post_init__()
+            s._vbdg = None
+            ctest = opt._jt_causality_test(s, top_pt.result)
+            causality_results.append({'point': top_pt, 'causality': ctest})
+            print(f"  lJT={top_pt.lambda_JT:.3f}  Δ={top_pt.Delta_total:.5f}  "
+                  f"-> {ctest['note']}  (Q_sc={ctest['Q_sc']:.5f}, Q_norm={ctest['Q_normal']:.5f})")
+
+    # ─────────────────────────────────────────────────────────────────────
+    # STAGE 2: channel strength refinement at the best material point
+    # ─────────────────────────────────────────────────────────────────────
+    ch_opt = ChannelOptimizer(solver, best1,
+                               Vs_bounds=Vs_bounds,
+                               Vd_bounds=Vd_bounds,
+                               n_grid=n_ch_grid,
+                               n_refine=n_ch_refine)
+    res2 = ch_opt.optimize()
+
+    # ─────────────────────────────────────────────────────────────────────
+    # Compose final best: material from Stage 1, channel from Stage 2
+    # ─────────────────────────────────────────────────────────────────────
+    elapsed_total = _time.time() - t0_total
+    print(f"\nTotal optimisation time: {elapsed_total/60:.1f} min")
+    print(f"  Stage 1 (material): {res1['elapsed_s']/60:.1f} min")
+    print(f"  Stage 2 (channel):  {res2['elapsed_s']:.1f} s")
+
+    return {
+        # Stage 1 material optimum
+        'best_mat':          best1,
+        'best_valid':        res1['best_valid'],
+        'best_raw':          res1['best_raw'],
+        # Stage 2 channel optimum
+        'V_s_scale':         res2['V_s_scale'],
+        'V_d_scale':         res2['V_d_scale'],
+        'Delta_s':           res2['Delta_s'],
+        'Delta_d':           res2['Delta_d'],
+        # Combined
+        'Delta':             res2['Delta_total'],
+        'score':             res2['score'],
+        'doping':            best1.doping,
+        'Delta_tetra':       best1.Delta_tetra,
+        'u':                 best1.u,
+        'g_JT':              best1.g_JT,
+        'result':            res2['result'],
+        'all_obs':           res1['observations'],
+        'ch_obs':            res2['grid_obs'],
+        'causality_results': causality_results,
+        'elapsed_s':         elapsed_total,
+    }
 
 # =============================================================================
 # 9. VISUALIZATION FUNCTIONS
@@ -2815,9 +3604,6 @@ def plot_phase_diagrams(solver: RMFT_Solver, initial_M: float, initial_Q: float,
     Doping-scan phase diagram with warm-start and crystal-field sweet-spot search.
 
     opt_result : optional dict returned by full_bayesian_optimize.
-        When supplied the figure gains a bottom row showing the Bayesian
-        optimisation summary (progress, δ/α_K/mix vs Δ scatter), making
-        plot_optimization_results redundant as a standalone call.
 
     Layout without opt_result (3×3):
       [0,0] Phase diagram   [0,1] CF sweet-spot   [0,2] DOS
@@ -2826,7 +3612,7 @@ def plot_phase_diagrams(solver: RMFT_Solver, initial_M: float, initial_Q: float,
 
     Layout with opt_result (4×3 — extra bottom row for BO panels):
       [3,0] BO progress     [3,1] δ vs Δ           [3,2] α_K vs Δ
-      (channel_mix vs Δ is inlined in [3,2] via a secondary x-axis or appended)
+      (V_s vs V_d split shown in [3,2] via a secondary annotation)
     """
     phase_data = {
         'target_doping': [], 'M': [], 'Q': [],
@@ -2838,7 +3624,7 @@ def plot_phase_diagrams(solver: RMFT_Solver, initial_M: float, initial_Q: float,
     print(f"\n{'='*70}")
     print(f"PHASE DIAGRAM SCAN  (n_points={len(doping_range)}, "
           f"δ: {doping_range[0]:.3f}→{doping_range[-1]:.3f})")
-    print(f"  channel_mix={solver.p.channel_mix:.2f}  "
+    print(f"  V_s_scale={solver.p.V_s_scale:.2f}  V_d_scale={solver.p.V_d_scale:.2f}  "
           f"U/t0={solver.p.u:.2f}  eta={solver.p.eta:.3f}  delta_0={solver.p.doping_0:.3f}")
     print(f"{'='*70}")
 
@@ -2901,20 +3687,52 @@ def plot_phase_diagrams(solver: RMFT_Solver, initial_M: float, initial_Q: float,
     # Crystal field sweet spot search
     # -------------------------------------------------------------------------
     print("\n\nCrystal field sweet spot search:")
-    print(f"Scanning Delta_CF from {cf_min:.3f} to {cf_max:.3f} eV")
+    print(f"Target ΔCF window: [{cf_min:.3f}, {cf_max:.3f}] eV  (scanned via Δ_tet)")
 
-    original_cf = solver.p.Delta_CF
+    # Save original Delta_tetra so we can restore it cleanly at the end.
+    original_Delta_tetra = solver.p.Delta_tetra
+
     ref_doping_idx = len(doping_range) // 2
     ref_doping = doping_range[ref_doping_idx]
-
     print(f"Reference doping: δ={ref_doping:.3f}")
 
-    cf_range = np.linspace(cf_min, cf_max, N_cf)
-    cf_gaps, cf_Q_values, cf_M_values = [], [], []
+    # Build a Delta_tetra grid whose resulting Delta_CF values span [cf_min, cf_max].
+    # We sample N_cf candidate Delta_tetra values and keep those whose Delta_CF
+    # falls in the requested window. The grid is constructed by inverting the
+    # monotone relationship: decreasing |Delta_tetra| increases Delta_CF.
+    # A fine pre-scan (200 points) identifies the correct Delta_tetra range.
+    _dt_prescan  = np.linspace(-0.60, 0.10, 200)
+    _cf_prescan  = np.array([
+        _gamma_splitting(solver.p.lambda_soc, dt, solver.p.Delta_inplane)
+        for dt in _dt_prescan
+    ])
+    # Find Delta_tetra values whose Delta_CF lies within [cf_min, cf_max]
+    _mask        = (_cf_prescan >= cf_min) & (_cf_prescan <= cf_max)
+    if _mask.sum() < 2:
+        # Fallback: use full prescan range
+        _mask = np.ones(len(_dt_prescan), dtype=bool)
+    _dt_lo, _dt_hi = _dt_prescan[_mask][[0, -1]]
+    # Build the actual scan grid (N_cf evenly spaced Delta_tetra values)
+    dt_scan_grid = np.linspace(_dt_lo, _dt_hi, N_cf)
+    # Compute the real Delta_CF for each grid point (used for axis labels)
+    cf_scan_actual = np.array([
+        _gamma_splitting(solver.p.lambda_soc, dt, solver.p.Delta_inplane)
+        for dt in dt_scan_grid
+    ])
+
+    cf_gaps, cf_Q_values, cf_M_values, cf_actual_CF = [], [], [], []
     cf_previous = None
 
-    for cf in cf_range:
-        solver.p.Delta_CF = cf
+    for dt, cf_actual in zip(dt_scan_grid, cf_scan_actual):
+        # Deep-copy params, set Delta_tetra, recompute all derived quantities.
+        p_cf = copy.copy(solver.p)
+        p_cf.Delta_tetra = float(dt)
+        p_cf.__post_init__()   # recomputes Delta_CF, U_mf, K_lattice, t_pd, …
+
+        cf_solver = copy.copy(solver)
+        cf_solver.p = p_cf
+        cf_solver._vbdg = None   # force fresh VectorizedBdG for the new params
+
         if cf_previous is not None:
             init_M     = cf_previous['M']
             init_Q     = cf_previous['Q']
@@ -2922,9 +3740,10 @@ def plot_phase_diagrams(solver: RMFT_Solver, initial_M: float, initial_Q: float,
         else:
             init_M     = phase_data['M'][ref_doping_idx]
             init_Q     = phase_data['Q'][ref_doping_idx]
-            init_Delta = phase_data['Delta_s'][ref_doping_idx] + phase_data['Delta_d'][ref_doping_idx]
+            init_Delta = (phase_data['Delta_s'][ref_doping_idx]
+                          + phase_data['Delta_d'][ref_doping_idx])
 
-        cf_result = solver.solve_self_consistent(
+        cf_result = cf_solver.solve_self_consistent(
             target_doping=ref_doping,
             initial_M=init_M, initial_Q=init_Q, initial_Delta=init_Delta,
             verbose=False
@@ -2932,23 +3751,29 @@ def plot_phase_diagrams(solver: RMFT_Solver, initial_M: float, initial_Q: float,
         cf_gaps.append(cf_result['Delta_d'])
         cf_Q_values.append(cf_result['Q'])
         cf_M_values.append(cf_result['M'])
+        cf_actual_CF.append(cf_actual)
         cf_previous = {
             'M': cf_result['M'], 'Q': cf_result['Q'],
             'Delta_s': cf_result['Delta_s'], 'Delta_d': cf_result['Delta_d']
         }
-        print(f"  ΔCF={cf:.4f} → Δs={cf_result['Delta_s']:.5f}  Δd={cf_result['Delta_d']:.5f} "
+        print(f"  Δ_tet={dt:+.4f} eV  ΔCF={cf_actual:.4f} eV → "
+              f"Δs={cf_result['Delta_s']:.5f}  Δd={cf_result['Delta_d']:.5f} "
               f"Q={cf_result['Q']:+.5f}  M={cf_result['M']:.4f}")
-        print(f"  χ₀(q_AFM) = {cf_result['chi0']:.4f}  |  RPA factor = {cf_result['rpa_factor']:.3f}×")
-        print(f"  Irrep selection R = {cf_result['irrep_info']['selection_ratio']:.4f} "
-              f"JT {'ALLOWED ✓' if cf_result['irrep_info']['jt_algebraically_allowed'] else 'BLOCKED ✗'}")
+        print(f"  χ₀(q_AFM) = {cf_result.get('chi0', float('nan')):.4f}"
+              f"  |  RPA factor = {cf_result.get('rpa_factor', float('nan')):.3f}×")
+        _irr = cf_result.get('irrep_info', {})
+        print(f"  Irrep selection R = {_irr.get('selection_ratio', float('nan')):.4f} "
+              f"JT {'ALLOWED ✓' if _irr.get('jt_algebraically_allowed', False) else 'BLOCKED ✗'}")
 
-    # Restore original Delta_CF
-    solver.p.Delta_CF = original_cf
+    # Use the actual Delta_CF values as the axis for the sweet-spot plot
+    cf_range = np.array(cf_actual_CF)   # replaces the old linspace(cf_min, cf_max)
 
     max_gap_idx = np.argmax(cf_gaps)
     sweet_spot_cf = cf_range[max_gap_idx]
     max_gap = cf_gaps[max_gap_idx]
-    print(f"\n✓ Sweet spot: ΔCF = {sweet_spot_cf:.3f} eV, Δmax = {max_gap:.4f} eV")
+    print(f"\n✓ Sweet spot: ΔCF = {sweet_spot_cf:.3f} eV"
+          f"  (Δ_tet = {dt_scan_grid[max_gap_idx]:+.4f} eV)"
+          f"  Δmax = {max_gap:.4f} eV")
 
     # -------------------------------------------------------------------------
     # 3×3 Figure layout
@@ -3071,25 +3896,41 @@ def plot_phase_diagrams(solver: RMFT_Solver, initial_M: float, initial_Q: float,
     # --- Optional row 3: Bayesian Optimisation panels ---
     if opt_result is not None:
         all_obs = opt_result.get('observations', opt_result.get('all_obs', []))
-        # Wrap in a compatible dict if full_bayesian_optimize return format used
-        if 'observations' not in opt_result and 'all_obs' in opt_result:
-            _wrapped = {'observations': all_obs}
-        else:
-            _wrapped = opt_result
-        plot_optimization_results(
-            _wrapped,
-            ax_progress=axes[3, 0],
-            ax_doping=axes[3, 1],
-            ax_alpha=axes[3, 2],
-            ax_mix=None,      # 4th panel omitted (3-col layout); mix info is in ax_alpha colour
-        )
-        # channel_mix as colour on alpha panel (already set inside plot_optimization_results)
-        # Add a super-title for the BO row
-        axes[3, 0].set_title('BO: Δ progress',         fontsize=11)
-        axes[3, 1].set_title('BO: doping δ vs Δ',      fontsize=11)
-        axes[3, 2].set_title('BO: alpha_K vs Δ',       fontsize=11)
-        plt.tight_layout()
+        if all_obs:
+            deltas  = [o.Delta_total for o in all_obs]
+            scores  = [getattr(o, 'score', o.Delta_total) for o in all_obs]
+            dopings = [o.doping for o in all_obs]
+            dt_vals = [getattr(o, 'Delta_tetra', getattr(o, 'alpha_K', 0)) for o in all_obs]
+            lJT_vals = [getattr(o, 'lambda_JT', 0.0) for o in all_obs]
+            # green: SC-triggered JT viable (0.05 < λ_JT < 1.0)
+            # orangered: spontaneous JT risk (λ_JT >= 1.0)
+            # orange: JT channel closed (λ_JT <= 0.05)
+            colours = ['green' if 0.05 < lj < 1.0 else ('orangered' if lj >= 1.0 else 'orange')
+                       for lj in lJT_vals]
 
+            running = np.maximum.accumulate(scores)
+            best_idx = int(np.argmax(scores))
+
+            ax_p = axes[3, 0]
+            ax_p.plot(deltas, 'o', alpha=0.4, color='steelblue', markersize=4, label='Δ')
+            ax_p.plot(scores, 's', alpha=0.4, color='darkgreen', markersize=4, label='score')
+            ax_p.plot(running, 'g-', linewidth=2, label='best score')
+            ax_p.set_xlabel('Evaluation'); ax_p.set_ylabel('eV')
+            ax_p.set_title('BO progress (green=SC-trig JT, red=spont. risk, orange=closed)', fontsize=11)
+            ax_p.legend(fontsize=8); ax_p.grid(True, alpha=0.3)
+
+            ax_d = axes[3, 1]
+            ax_d.scatter(dopings, scores, c=colours, s=40, alpha=0.7)
+            ax_d.axvline(dopings[best_idx], color='gold', linewidth=1.5, linestyle='--')
+            ax_d.set_xlabel('Doping δ'); ax_d.set_ylabel('score')
+            ax_d.set_title('BO: doping vs score', fontsize=11); ax_d.grid(True, alpha=0.3)
+
+            ax_a = axes[3, 2]
+            ax_a.scatter(dt_vals, scores, c=colours, s=40, alpha=0.7)
+            ax_a.axvline(dt_vals[best_idx], color='gold', linewidth=1.5, linestyle='--')
+            ax_a.set_xlabel('Δ_tetra (eV)'); ax_a.set_ylabel('score')
+            ax_a.set_title('BO: Δ_tetra vs score', fontsize=11); ax_a.grid(True, alpha=0.3)
+        plt.tight_layout()
     return fig
 
 def _plot_phase_data(ax, phase_data: Dict):
@@ -3103,7 +3944,11 @@ def _plot_phase_data(ax, phase_data: Dict):
     # Plot order parameters vs doping
     ax.plot(doping, M, 'r-o', linewidth=2, markersize=6, label='AFM (M)')
     ax.plot(doping, Q, 'g-s', linewidth=2, markersize=6, label='JT Distortion (Q)')
-    ax.plot(doping, np.array(phase_data['Delta_d']), 'b-^', linewidth=2, markersize=6, label='SC Gap (Δ)')
+    Delta_s_arr = np.array(phase_data['Delta_s'])
+    Delta_d_arr = np.array(phase_data['Delta_d'])
+    ax.plot(doping, Delta_s_arr,               'b--^', linewidth=1.5, markersize=5, label='Δ_s (on-site B₁g)')
+    ax.plot(doping, Delta_d_arr,               'c--v', linewidth=1.5, markersize=5, label='Δ_d (d-wave B₁g)')
+    ax.plot(doping, Delta_s_arr + Delta_d_arr, 'b-^',  linewidth=2,   markersize=6, label='|Δ| total')
     
     ax.set_xlabel('Doping δ', fontsize=14)
     ax.set_ylabel('Order Parameters', fontsize=14)
@@ -3118,38 +3963,33 @@ def _plot_phase_data(ax, phase_data: Dict):
     if doping[-1] >= 0.15:
         ax.axvspan(0.05, 0.15, alpha=0.1, color='blue', label='SC+JT coexistence')
     
-def _plot_dos(ax, solver: RMFT_Solver, result: Dict):
-    """ Plot the density function (DOS) of the system to see the van Hove peaks. """
-    all_energies = []
+def _plot_dos(ax, solver: 'RMFT_Solver', result: Dict):
+    """ Plot the density of states (DOS) to reveal van Hove singularities. """
+
     M, Q, Delta_s, Delta_d, target_doping, mu, tx, ty, g_J = (result['M'], result['Q'], result['Delta_s'], result['Delta_d'], result['target_doping'], result['mu'], result['tx'], result['ty'], result['g_J'])
 
-    for kvec in solver.k_points:
-        H_BdG = solver.build_bdg_matrix(kvec, M, Q, Delta_s, Delta_d, target_doping, mu, tx, ty, g_J)
-        vals = np.linalg.eigvalsh(H_BdG)
-        all_energies.extend(vals)
+    vbdg = solver._get_vbdg()
+    H_stack = vbdg._build_H_stack(
+        solver.k_points, M, Q, Delta_s, Delta_d,
+        target_doping, mu, tx, ty, g_J)           # (N_k, 16, 16)
+    all_energies = np.linalg.eigvalsh(H_stack).ravel()  # (N_k*16,)
 
-    all_energies = np.array(all_energies)
     ax.hist(all_energies, bins=200, density=True, color='blue', alpha=0.7, label='DOS')
-
-    # Fermi level (E = mu, but in BdG 0 is the Fermi level)
     ax.axvline(x=0.0, color='red', linestyle='--', label='Fermi Level ($E_F$)')
     ax.set_title(
         f"Density of States (DOS)\n"
         f"$\\Delta_{{CF}}={solver.p.Delta_CF:.4f}$ eV, "
-        f"Doping δ={result.get('target_doping', 'N/A')}"
+        f"Doping δ={target_doping}"
     )
     ax.set_xlabel("Energy (eV)")
     ax.set_ylabel("Density")
     ax.legend()
     ax.grid(True)
 
-    # Check: Is there a peak at 0?
     hist, bin_edges = np.histogram(all_energies, bins=200, density=True)
     bin_centers = 0.5 * (bin_edges[:-1] + bin_edges[1:])
-    
     peaks, _ = find_peaks(hist, prominence=0.1 * np.max(hist))
     vhs_energies = bin_centers[peaks]
-    
     print(f"\nVan Hove singularities detected at energies: {vhs_energies}")
     fermi_distance = np.min(np.abs(vhs_energies)) if len(vhs_energies) > 0 else np.inf
     print(f"Closest VHS to Fermi level: {fermi_distance:.4f} eV")
@@ -3162,13 +4002,13 @@ if __name__ == "__main__":
     print("""
     ╔═══════════════════════════════════════════════════════════════════╗
     ║  SC-Activated JT Model - Variational Free Energy Minimization     ║
-    ║  Implements: SC → Γ₆–Γ₇ mixing → JT via ∂F/∂M = ∂F/∂Q = 0     ║
-    ║  Optimisation: Bayesian GP (Matérn 2.5) + VectorizedBdG          ║
+    ║  Implements: SC → Γ₆–Γ₇ mixing → JT via ∂F/∂M = ∂F/∂Q = 0         ║
+    ║  Optimisation: Bayesian GP (Matérn 2.5) + VectorizedBdG           ║
     ╚═══════════════════════════════════════════════════════════════════╝
     """)
 
     # ------------------------------------------------------------------ #
-    # Base parameters. alpha_K and channel_mix are Bayesian search variables.
+    # Base parameters. alpha_K, V_s_scale, V_d_scale are Bayesian search variables.
     # ------------------------------------------------------------------ #
     params = ModelParams(
         t0=0.328,
@@ -3190,7 +4030,8 @@ if __name__ == "__main__":
         CLUSTER_WEIGHT=0.35,
         ALPHA_D=0.3,
         mu_LM_D=1.0,
-        channel_mix=0.5,
+        V_s_scale=1.0,
+        V_d_scale=1.0,
         Z=4,
         nk=74,
         kT=0.011,
@@ -3210,43 +4051,54 @@ if __name__ == "__main__":
     print(f"  → search range: α_K ∈ [1.05, {alpha_bound:.3f}]")
 
     # ------------------------------------------------------------------ #
-    # Bayesian optimisation over (doping, alpha_K, channel_mix).
+    # Bayesian optimisation over 5D (Delta_tetra, u, g_JT, V_s_scale, V_d_scale).
     # ------------------------------------------------------------------ #
     print("\n" + "="*70)
-    print("BAYESIAN PARAMETER OPTIMISATION")
+    print("BAYESIAN MATERIAL PARAMETER OPTIMISATION")
     print("="*70)
 
     opt = full_bayesian_optimize(
         solver,
-        doping_bounds    = (0.08, 0.30),
-        alpha_bounds     = (1.05, min(alpha_bound, 3.5)),
-        mix_bounds       = (0.0,  1.0),
-        n_initial        = 15,    # LHS seed evaluations
-        n_iterations     = 38,    # GP-guided BO steps  → total 53 runs
-        n_workers        = 4,     # set > 1 for multi-core parallel batch
-        alpha_K_hard_max = alpha_bound
+        doping_bounds      = (0.08, 0.30),
+        Delta_tetra_bounds = (-0.30, -0.05),
+        u_bounds           = (4.0, 8.0),
+        gJT_bounds         = (0.4, 1.2),
+        Vs_bounds          = (0.1, 2.5),
+        Vd_bounds          = (0.1, 2.5),
+        n_doping_scan      = 5,      # inner doping scan per material
+        n_ch_grid          = 5,      # Stage 2: 5×5 channel grid
+        n_ch_refine        = 15,     # Stage 2: GP refinement points
+        n_initial          = 15,
+        n_refine           = -1,     # auto: ~5 adaptive seeds
+        n_iterations       = 38,
+        n_workers          = 4,
     )
 
+    winner = opt.get('best_valid') or opt['best_mat']
     print(f"\nOptimal parameters found:")
     print(f"  doping      δ = {opt['doping']:.4f}")
-    print(f"  alpha_K       = {opt['alpha_K']:.4f}")
-    print(f"  channel_mix   = {opt['channel_mix']:.4f}")
-    print(f"  Δ_max         = {opt['Delta']:.6f} eV")
+    print(f"  Delta_tetra   = {opt['Delta_tetra']:.4f} eV")
+    print(f"  u (U/t0)      = {opt['u']:.4f}")
+    print(f"  g_JT          = {opt['g_JT']:.4f} eV/Å")
+    print(f"  V_s_scale     = {opt['V_s_scale']:.4f}  (Stage 2)")
+    print(f"  V_d_scale     = {opt['V_d_scale']:.4f}  (Stage 2)")
+    print(f"  Δ_s           = {opt['Delta_s']:.6f} eV")
+    print(f"  Δ_d           = {opt['Delta_d']:.6f} eV")
+    print(f"  |Δ| total     = {opt['Delta']:.6f} eV")
+    print(f"  score         = {opt['score']:.6f}")
     print(f"  Elapsed       = {opt['elapsed_s']/60:.1f} min")
 
     # ------------------------------------------------------------------ #
-    # Optional: phase diagram at the optimal parameters.
+    # Phase diagram at the optimal material parameters.
     # ------------------------------------------------------------------ #
-    
-    params.alpha_K     = opt['alpha_K']
-    params.channel_mix = opt['channel_mix']
-    params.K_lattice   = params.g_JT**2 / (params.alpha_K * max(params.Delta_CF, 1e-9))
+    params.Delta_tetra = winner.Delta_tetra
+    params.u           = winner.u
+    params.g_JT        = winner.g_JT
+    params.V_s_scale   = opt['V_s_scale']   # Stage 2 channel optimum
+    params.V_d_scale   = opt['V_d_scale']
+    params.__post_init__()   # recompute Delta_CF, U, K_lattice
     solver_opt = RMFT_Solver(params)
-    # opt_result passed here → Bayesian panels are embedded in row 3 of the figure.
-    # This replaces the old standalone plot_optimization_results() call.
-    _opt_result_for_plot = {
-        'observations': opt['all_obs'],
-    }
+    _opt_result_for_plot = {'observations': opt['all_obs']}
     fig = plot_phase_diagrams(
         solver_opt,
         initial_M=0.25, initial_Q=0.06, initial_Delta=0.04,
