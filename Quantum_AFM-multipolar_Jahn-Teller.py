@@ -404,7 +404,8 @@ class SusceptibilityMixin:
                     _E_k_cache: tuple = None,
                     _E_kq_cache: tuple = None,
                     vertex_params: dict = None,
-                    _chi_QQ_cache: float = None) -> dict:
+                    _chi_QQ_cache: float = None,
+                    actual_doping: float = None) -> dict:
         """
         Exact q-dependent χ₀(q) tensor in the normal state (Δ=0), with optional in-place RPA vertex calculation.
 
@@ -490,8 +491,9 @@ class SusceptibilityMixin:
         K_bare = max(self._K_bare, 1e-9)
 
         # At half-filling (δ→0) damping vanishes and the QCP is sharp; at large δ metallic screening broadens it.
+        _moriya_doping = actual_doping if actual_doping is not None else target_doping
         _t_eff_proxy  = float(np.sqrt(max(V_JT * K_bare, 1e-12)))
-        _alpha_M      = _moriya_alpha(target_doping, _t_eff_proxy, J_eff)
+        _alpha_M      = _moriya_alpha(_moriya_doping, _t_eff_proxy, J_eff)
         _Gamma_M      = _alpha_M * max(J_eff, 1e-9) * _t_eff_proxy
         chi_SS_moriya = chi_SS_bare / (1.0 + _Gamma_M * max(chi_SS_bare, 0.0))
 
@@ -1162,7 +1164,7 @@ class RMFT_Solver(SusceptibilityMixin):
         vF     = vF_arr
         return fs_pts, vF
 
-    def solve_linearized_gap_equation(self, M: float, Q: float, Delta_s: complex, Delta_d: complex, target_doping: float, mu: float, tx: float, ty: float, g_J: float) -> Dict:
+    def solve_linearized_gap_equation(self, M: float, Q: float, Delta_s: complex, Delta_d: complex, target_doping: float, mu: float, tx: float, ty: float, g_J: float, actual_doping: float = None) -> Dict:
         """
         Linearised gap equation solved as an eigenvalue problem on the Fermi surface.
 
@@ -1222,7 +1224,8 @@ class RMFT_Solver(SusceptibilityMixin):
                 _E_k_cache=(E_k_cache, U_k_cache),
                 _E_kq_cache=kq_caches[u_idx],
                 vertex_params={'J_eff': J_eff, 'V_JT': V_JT, 'chi_QQ_normal': chi_QQ_normal},
-                _chi_QQ_cache=chi_QQ_normal)   # skip per-q recomputation
+                _chi_QQ_cache=chi_QQ_normal,
+                actual_doping=actual_doping)
 
             V_unique[u_idx] = _sus_qu['V_full']
             V_spin_u[u_idx] = _sus_qu['V_spin']
@@ -1600,7 +1603,7 @@ class RMFT_Solver(SusceptibilityMixin):
             'J_eff':         J_eff
         }
 
-    def _scf_jacobi_kick(self, target_doping: float, initial_M: float, initial_Q: float) -> Dict:
+    def _scf_jacobi_kick(self, target_doping: float, initial_M: float, initial_Q: float, initial_Delta: float) -> Dict:
         """
         Estimate the dominant Jacobi eigenvalue λ₊ of the two-channel (Δ, Q) SCF map
         and generate physics-informed seed values  for (M, Q, Δ_s, Δ_d).
@@ -1750,7 +1753,6 @@ class RMFT_Solver(SusceptibilityMixin):
         ALPHA_HF = self.p.ALPHA_HF
         converged = False
         # K_eff is tracked as a LOCAL variable throughout the SCF loop.
-        # All places that previously read self.p.K_lattice for K_eff now receive _K_eff_scf.
         _K_eff_scf: float = self._K_bare   # local; updated by exchange rigidity each ~5 iters
         self._cluster_j_renorm = 1.0
         _mu0_est: float
@@ -1762,7 +1764,7 @@ class RMFT_Solver(SusceptibilityMixin):
             _mu0_est = 2.0 * self.p.t0 * np.tanh(abs(target_doping) / 0.1)
         _mu0_est += 0.5 * self.p.Delta_CF
 
-        kick = self._scf_jacobi_kick(target_doping, initial_M, initial_Q)
+        kick = self._scf_jacobi_kick(target_doping, initial_M, initial_Q, float(initial_Delta))
 
         M = kick['M_kick']
         Q = kick['Q_kick']
@@ -1779,7 +1781,6 @@ class RMFT_Solver(SusceptibilityMixin):
             'M': [], 'Q': [], 'Delta': [], 'density': [],
             'F_bdg': [], 'F_cluster': [],
             'g_t': [], 'g_J': [], 'mu': [],
-            'chi0': [], 'rpa_factor': [], 'afm_unstable': [], 'selection_ratio': [],
             'mixing': [],       # adaptive mixing rate per iteration
         }
 
@@ -1873,8 +1874,7 @@ class RMFT_Solver(SusceptibilityMixin):
                 _K_eff_last_iter = iteration
 
             # Using the RPA-vertex gap equation result to find fixpoint
-            #    The _bdg_cache here feeds ONLY into the anomalous Green function F_AA:
-            #      Δ_out = g_Δ · V_s · F_AA(k; Δ, M, Q)
+            # The _bdg_cache here feeds ONLY into the anomalous Green function F_AA:  Δ_out = g_Δ · V_s · F_AA(k; Δ, M, Q)
             Delta_s_out, Delta_d_out, _vertex_cache = self._get_vbdg().compute_gap_eq_vectorized(
                 M, Q, Delta_s, Delta_d, target_doping, mu, tx, ty, g_J, g_Delta_s, g_Delta_d,
                 _bdg_cache=(_bdg_ev_sc, _bdg_ec_sc),
@@ -1918,12 +1918,11 @@ class RMFT_Solver(SusceptibilityMixin):
             Q_out = -(self.p.g_JT / max(_K_eff_scf, 1e-9)) * tau_x
             Q_out = float(np.clip(Q_out, -0.5 * self.p.lambda_hop, 0.5 * self.p.lambda_hop))
 
-            # Δ update BEFORE Anderson mix of (M, Q) so the M update sees the current SC state, not the previous one, avoiding delayed convergence from asymmetric M→Δ feedback.
+            # Δ update BEFORE Anderson mix of (M, Q) so the M update sees the current SC state, avoiding delayed convergence from asymmetric M→Δ feedback.
             Delta_s_mixed = self._mix(Delta_s, Delta_s_out, alpha=_alpha)
             Delta_d_mixed = self._mix(Delta_d, Delta_d_out, alpha=_alpha)
 
-            # 4D Anderson vector (M, Q, |Δ_s|, |Δ_d|)
-            # Include Δ to capture ∂M/∂Δ and ∂Δ/∂M coupling in the Jacobian.
+            # 4D Anderson vector (M, Q, |Δ_s|, |Δ_d|) to capture ∂M/∂Δ and ∂Δ/∂M coupling in the Jacobian.
             # Scale variables to similar magnitudes in the least-squares solve: M ×1,  Q ×1/λ_hop,  Δ_s ×t₀,  Δ_d ×t₀.
             _t0_sc = max(self.p.t0, 1e-6)
             _lhop  = max(self.p.lambda_hop, _KT_FLOOR)
@@ -2032,6 +2031,8 @@ class RMFT_Solver(SusceptibilityMixin):
                 _alpha = min(_alpha, self.p.mixing * 0.6)
             if _vertex_cache is not None:
                 _vertex_cache['near_critical'] = _near_critical
+                # Update actual_doping from the μ-finder density — used by Moriya damping in the *next* vertex rebuild so it reflects the current ⟨n⟩.
+                _vertex_cache['actual_doping'] = float(1.0 - n_kspace_new)
 
             _iter_ms = (_time.time() - _iter_t0) * 1000.0
 
@@ -2070,20 +2071,13 @@ class RMFT_Solver(SusceptibilityMixin):
 
             M, Q, Delta_s, Delta_d, mu = M_mixed, Q_mixed, Delta_s_mixed, Delta_d_mixed, mu_new
 
-            # ── Saddle-escape kick ────────────────────────────────────────────
-            # When |Δ| is stuck near zero AND the Hessian has a sufficiently
-            # negative eigenvalue, the SCF is sitting at a saddle point of F.
-            # Strategy: kick along the eigenvector of λ_min — this is the
-            # direction of steepest descent from the saddle, and identifies
-            # *which* combination of (M, Q, Δ) the system wants to move in.
-            #
+            # Saddle-escape kick: if |Δ| ≈ 0 and the Hessian has a negative eigenvalue, SCF sits at a saddle of F.
+            # Kick along the λ_min eigenvector (steepest descent) to reveal the preferred (M, Q, Δ) direction.
             # Mode identification from the eigenvector components (M, Q, Δ):
             #   |e[2]| ≫ |e[0]|,|e[1]|  → pure SC instability  (clean Δ kick)
             #   |e[1]| ≫ |e[0]|,|e[2]|  → pure JT instability  (kick Q too)
             #   |e[1]| and |e[2]| both large → SC-triggered JT  (the target!)
             #   |e[0]| dominant           → AFM fluctuation     (kick M)
-            #
-            # The kick magnitude is scaled by kT so it is a thermal fluctuation amplitude
             _Delta_abs_now = abs(Delta_s) + abs(Delta_d)
             _kick_eligible = (
                 _Delta_abs_now < 5.0 * self.p.tol
@@ -2130,7 +2124,7 @@ class RMFT_Solver(SusceptibilityMixin):
                         else:
                             _mode = 'mixed'
 
-                        # Kick magnitude: 2·kT in physical units
+                        # The kick magnitude is scaled by 2·kT so it is a thermal fluctuation amplitude
                         _kick_mag = 2.0 * self.p.kT
 
                         M_kick  = float(np.clip(
@@ -2179,7 +2173,7 @@ class RMFT_Solver(SusceptibilityMixin):
                           f"dens_err={abs(n_kspace_new-(1-target_doping)):.2e}")
 
         # Post-loop diagnostic: λ_max (normal-state instability)
-        _lin: Dict = self.solve_linearized_gap_equation(M, Q, Delta_s, Delta_d, target_doping, mu, tx_mixed, ty_mixed, g_J)
+        _lin: Dict = self.solve_linearized_gap_equation(M, Q, Delta_s, Delta_d, target_doping, mu, tx_mixed, ty_mixed, g_J, actual_doping=float(1.0 - n_kspace_new))
         # λ_max already accounts for the d-wave sign via φ_d(k), so a negative FS-average is normal for B1g.
         # λ_max indicates the pairing strength, but λ_max absolute value unreliable pre-SCF (log(1/T) divergence + g_Δ amplification
         # Reliable: gap symmetry (B1g/A1g), sign (>0 = attractive channel exists), d vs s competition.
@@ -2222,11 +2216,11 @@ class RMFT_Solver(SusceptibilityMixin):
                 _n_sus = self.get_susceptibilities_normal(
                     q=np.zeros(2), M=M, Q=Q,
                     target_doping=target_doping, mu=mu,
-                    tx=tx_mixed, ty=ty_mixed, g_J=g_J)
+                    tx=tx_mixed, ty=ty_mixed, g_J=g_J,
+                    actual_doping=float(1.0 - n_kspace_new))
                 _chi_SQ_normal = _n_sus['chi_SQ']
 
                 # SC-state χ_SQ: Δ≠0 → condensate opens the Γ₆↔Γ₇ channel.
-                # 'sc' mode reports the χ_QQ enhancement as a proxy for the opened channel.
                 # Direct τ_x projection from chi0_tensor at Δ≠0 is unavailable without a BdG Lindhard sum
                 # — the QQ-ratio proxy is the correct approximation here
                 _sc_sus = self.get_susceptibilities_sc(
@@ -2253,7 +2247,7 @@ class RMFT_Solver(SusceptibilityMixin):
             
             # Lambda_s / Lambda_d channel decomposition post-SCF if lambda_d > lambda_s but Delta_s != 0, the SCF has mixed channels beyond what the linear kernel predicts.
             try:
-                _lin_post = self.solve_linearized_gap_equation(M, Q, Delta_s, Delta_d, target_doping, mu, tx_mixed, ty_mixed, g_J)
+                _lin_post = self.solve_linearized_gap_equation(M, Q, Delta_s, Delta_d, target_doping, mu, tx_mixed, ty_mixed, g_J, actual_doping=float(1.0 - n_kspace_new))
                 _gap_vec   = _lin_post['gap_vector']
                 _fs_pts    = _lin_post['fs_pts']
                 _phi_s     = np.ones(len(_fs_pts));    _phi_s /= np.linalg.norm(_phi_s)
@@ -2821,40 +2815,6 @@ class RMFT_Solver(SusceptibilityMixin):
         M0        = (1-w)*M_stoner + w*M_prior
         return float(np.clip(M0, 0.02, 0.45))
 
-    def _background_at_T(self, T: float, doping: float, sc_result: dict) -> tuple:
-        """
-        Return (M, Q, Delta_s, Delta_d, mu, tx, ty, g_J) at temperature T using a warm-started normal-state SCF solve.
-        Used as input to solve_linearized_gap_equation. The SC gap is intentionally set to zero
-        so λ_max(T) measures the linearised pairing instability, not the already-condensed state.
-        """
-        s = copy.copy(self)
-        s.p = copy.copy(self.p)
-        s.p.kT = T
-        s._K_bare = self._K_bare
-        s._reset_transient_state()
-        try:
-            res = s.solve_self_consistent(
-                target_doping  = doping,
-                initial_M      = self._estimate_M0(doping, sc_result),
-                initial_Q      = 1e-6,
-                initial_Delta  = 1e-8,   # normal-state background: no SC seed
-                verbose        = False,
-            )
-            M       = res['M']
-            Q       = res['Q']
-            mu      = res['mu']
-            tx      = res['tx']
-            ty      = res['ty']
-            g_J     = res['g_J']
-            Delta_s = complex(res['Delta_s'])
-            Delta_d = complex(res['Delta_d'])
-        except Exception:
-            g_t = (2.0 * doping) / (1.0 + doping)
-            g_J = 4.0 / (1.0 + doping)**2
-            M, Q, Delta_s, Delta_d = 0.1, 0.0, 0.0+0j, 0.0+0j
-            mu, tx, ty = 0.0, g_t * self.p.t0, g_t * self.p.t0
-        return M, Q, Delta_s, Delta_d, mu, tx, ty, g_J
-
     def compute_lambda_vs_T(self, doping: float, sc_result: dict, T_points: np.ndarray = None) -> Dict:
         """
         Compute the linearised gap eigenvalue λ_max(T) across a temperature range.
@@ -2888,9 +2848,24 @@ class RMFT_Solver(SusceptibilityMixin):
             s_T._K_bare = self._K_bare
             s_T._reset_transient_state()
             try:
-                bg  = s_T._background_at_T(T, doping, sc_result)
-                M, Q, Ds, Dd, mu, tx, ty, g_J = bg
-                lin = s_T.solve_linearized_gap_equation(M, Q, Ds, Dd, doping, mu, tx, ty, g_J)
+                res = s_T.solve_self_consistent(
+                    target_doping  = doping,
+                    initial_M      = self._estimate_M0(doping, sc_result),
+                    initial_Q      = 1e-5,
+                    initial_Delta  = 0.0,   # The SC gap is intentionally set to zero so λ_max(T) measures the linearised pairing instability, not the already-condensed state.
+                    verbose        = False,
+                )
+                M       = res['M']
+                Q       = res['Q']
+                mu      = res['mu']
+                tx      = res['tx']
+                ty      = res['ty']
+                g_J     = res['g_J']
+                Delta_s = complex(res['Delta_s'])
+                Delta_d = complex(res['Delta_d'])
+                actual_doping = float(1.0 - res['density'])
+
+                lin = s_T.solve_linearized_gap_equation(M, Q, Delta_s, Delta_d, doping, mu, tx, ty, g_J, actual_doping=actual_doping)
                 lam_arr[i] = float(lin['lambda_max'])
                 sym_list.append(lin['gap_symmetry'])
             except Exception:
@@ -3282,7 +3257,7 @@ class RMFT_Solver(SusceptibilityMixin):
             def _lambda_at_Q(Qv):
                 tx_b, ty_b = self.effective_hopping_anisotropic(Qv)
                 tx_v = g_t_dl * tx_b; ty_v = g_t_dl * ty_b
-                lin = self.solve_linearized_gap_equation(M, Qv, 0.0+0j, 0.0+0j, target_doping, chi['mu_n'], tx_v, ty_v, g_J_dl)
+                lin = self.solve_linearized_gap_equation(M, Qv, 0.0+0j, 0.0+0j, target_doping, chi['mu_n'], tx_v, ty_v, g_J_dl, actual_doping=target_doping)
                 return lin['lambda_max']
 
             lp = _lambda_at_Q(_dQ_probe)
@@ -3616,12 +3591,14 @@ class VectorizedBdG:
             _vp_v = {'J_eff': J_eff_v, 'V_JT': V_JT, 'chi_QQ_normal': chi_QQ_normal_v, 'return_det': True}
 
             # s-channel: single q=0 call — chi0 + vertex in one Lindhard sum.
+            _actual_dop_v = _vertex_cache.get('actual_doping', target_doping) if _vertex_cache else target_doping
             _n_sus_q0_v = slv.get_susceptibilities_normal(
                 q=np.zeros(2), M=M, Q=Q,
                 target_doping=target_doping, mu=mu, tx=tx, ty=ty, g_J=g_J,
                 _E_k_cache=E_k_cache_normal,
                 vertex_params=_vp_v,
-                _chi_QQ_cache=chi_QQ_normal_v)
+                _chi_QQ_cache=chi_QQ_normal_v,
+                actual_doping=_actual_dop_v)
             V_s_scalar = _n_sus_q0_v['V_full']
             _det_q0    = _n_sus_q0_v['rpa_det']
 
@@ -3652,7 +3629,8 @@ class VectorizedBdG:
                         _E_k_cache=E_k_cache_normal,
                         _E_kq_cache=kq_caches_v[ui],
                         vertex_params=_vp_v,
-                        _chi_QQ_cache=chi_QQ_normal_v)
+                        _chi_QQ_cache=chi_QQ_normal_v,
+                        actual_doping=_actual_dop_v)
                     V_rpa[ui] = _n_sus_qu['V_full']
 
                 # Vectorised symmetric fill: avoids Python loop over ij pairs
@@ -3678,6 +3656,7 @@ class VectorizedBdG:
                 'det_q0':             _det_q0,  # RPA det at q=0: near_critical proxy
                 'near_critical':      False,    # updated by SCF loop each iteration
                 'chi_QQ_from_normal': True,     # True: chi_QQ_normal_v was computed at Δ=0; prevent double-counting the SC-triggered JT feedback in the pairing vertex
+                'actual_doping':      target_doping,  # updated by SCF loop to 1−⟨n⟩ when available
             }
         else:
             V_s_scalar = _vertex_cache['V_s_scalar']
@@ -4389,7 +4368,19 @@ class UnifiedBayesianOptimizer:
 
         score     = self._score(Delta, converged, result, Tc, G_post)
         stoner_ok = not result['afm_unstable']
-        lambda_JT = (solver.p.g_JT**2 / max(solver._K_bare, 1e-9)) * result['chi_tau']
+        
+        _chi_tau_val = result.get('chi_tau')
+        if _chi_tau_val is None:  # Recompute chi_tau from the available (M, Q, μ) if SCF did not converge fully.
+            _chi_tau_val = solver._compute_chi_tau(
+                result.get('M', initial_M),
+                result.get('Q', 0.0),
+                doping,
+                complex(result.get('Delta_s', 0.0)),
+                complex(result.get('Delta_d', 0.0)),
+                result.get('mu', 0.0),
+            )['chi_tau']
+
+        lambda_JT = (solver.p.g_JT**2 / max(solver._K_bare, 1e-9)) * _chi_tau_val
         lambda_max = result['lambda_max']
         G_chi_K   = G_post['chi_QQ'] / max(G_post['K_eff'], 1e-9)
         regime    = ('SC-triggered' if 0.05 < lambda_JT < 1.0
@@ -4973,7 +4964,7 @@ if __name__ == "__main__":
     ╔═══════════════════════════════════════════════════════════════════╗
     ║  SC-Activated JT Model - Variational Free Energy Minimization     ║
     ║  Implements: SC → Γ₆–Γ₇ mixing → JT via ∂F/∂M = ∂F/∂Q = 0         ║
-    ║  Optimizer: Unified 5D pipeline (DE→GP→TuRBO→LocalRefine)          ║
+    ║  Optimizer: Unified 5D pipeline (DE→GP→TuRBO→LocalRefine)         ║
     ╚═══════════════════════════════════════════════════════════════════╝
     """, flush=True)
 
@@ -5005,7 +4996,6 @@ if __name__ == "__main__":
     params.summary()
     solver = RMFT_Solver(params)
     target_doping = 0.15
-    supposed_doping = target_doping
     supposed_M    = solver._estimate_M0(target_doping)
     initial_Q     = 1e-5
     initial_Delta = 1e-5
@@ -5064,7 +5054,10 @@ if __name__ == "__main__":
     _tx_bare_ref, _ty_bare_ref = solver.effective_hopping_anisotropic(initial_Q)
     _tx_ref = _g_t_ref * _tx_bare_ref
     _ty_ref = _g_t_ref * _ty_bare_ref
-    _lin = solver.solve_linearized_gap_equation(supposed_M, initial_Q, 0.0+0j, 0.0+0j, target_doping, G_base['mu_n'], _tx_ref, _ty_ref, _g_J_ref)
+    # Pre-SCF: no converged SCF density is available yet, so target_doping is the only reliable input for Moriya damping.
+    _lin = solver.solve_linearized_gap_equation(
+        supposed_M, initial_Q, 0.0+0j, 0.0+0j,
+        target_doping, G_base['mu_n'], _tx_ref, _ty_ref, _g_J_ref, actual_doping=target_doping)
     _V_spin = _lin['V_spin_mean']
     _V_JT   = _lin['V_JT_mean']
     _V_cr   = _lin['V_cross_mean']
@@ -5090,7 +5083,7 @@ if __name__ == "__main__":
     # Moriya damping diagnostic: report bare chi_SS and the Moriya-damped value used in RPA.
     _V_JT_ref     = solver.p.g_JT**2 / max(solver._K_bare, 1e-9)
     _t_eff_proxy  = float(np.sqrt(max(_V_JT_ref * solver._K_bare, 1e-12)))
-    _alpha_M_log  = _moriya_alpha(supposed_doping, _t_eff_proxy, float(_J_eff_log))
+    _alpha_M_log  = _moriya_alpha(target_doping, _t_eff_proxy, float(_J_eff_log))
     _Gamma_M_log  = _alpha_M_log * max(float(_J_eff_log), 1e-9) * _t_eff_proxy
     _chi_SS_log   = G_base['chi_DD_s']
     _chi_SS_M_log = _chi_SS_log / (1.0 + _Gamma_M_log * max(_chi_SS_log, 0.0))
@@ -5099,7 +5092,7 @@ if __name__ == "__main__":
              f"  chi_SS(bare)={_chi_SS_log:.4f}  chi_SS(Moriya)={_chi_SS_M_log:.4f}"
              f"  ratio={_moriya_ratio:.3f}x"
              f"  J_eff*chi_SS(M)={_J_eff_log*_chi_SS_M_log:.4f} [{'near QCP' if _J_eff_log*_chi_SS_M_log > 0.7 else 'safe'}]"
-             f"  [doping={supposed_doping:.3f} → α_M(δ)={_alpha_M_log:.3f}, was fixed={_ALPHA_MORIYA:.3f}]")
+             f"  [pre-SCF: δ={target_doping:.3f} → α_M={_alpha_M_log:.3f}")
     # V_RPA(FS-avg): average of V(q=k_i−k_j) over FS pairs. For d-wave this is usually NEGATIVE: forward scattering (q≈0) repulsive, back-scattering (q≈(π,π)) attractive.
     if abs(_V_tot) > 1e-4:
         _f_spin = _V_spin / _V_tot
@@ -5143,8 +5136,8 @@ if __name__ == "__main__":
         'Delta_tetra': (-0.23, -0.09),
         'lambda_soc':  ( 0.08,  0.24),
         'u':           (11.0,  20.0),
-        'g_JT':        ( 0.16,  0.26),
-        't_pd':        ( 0.33,  0.68),
+        'g_JT':        ( 0.17,  0.26),
+        't_pd':        ( 0.34,  0.68),
     }
 
     unified_bo = UnifiedBayesianOptimizer(solver, n_doping_scan=7)
