@@ -58,7 +58,13 @@ This diagonalization yields the Γ₆–Γ₇ splitting `Δ_CF` as a **derived q
 - `Δ_axial = Δ_tetra · Lz²` — controls the Γ₆–Γ₇ gap; **required < 0** (tetragonal compression, c < a).
 - `Δ_inplane = Δ_inplane · (Lx² − Ly²)` — splits the Γ₇ quartet into two Kramers doublets (Γ₇a, Γ₇b) without removing Kramers degeneracy, preventing spontaneous JT in the normal state.
 
-When `lambda_soc`, `Delta_tetra`, or `Delta_inplane` are changed on a solver clone (e.g. in Bayesian optimisation), `p.__post_init__()` must be followed by `solver._rebuild_orbital_operators(p)` to keep P₆, P₇, τ₁₆, and `sz_bdg_op` consistent with the new eigenbasis.
+Two quantities are derived directly from the eigenvectors and stored in `__post_init__`:
+
+- **`η` (Γ₇ AFM asymmetry):** `η = |⟨Γ₇|S_z|Γ₇⟩| / |⟨Γ₆|S_z|Γ₆⟩|`, computed from the S_z matrix elements of the first Kramers partners of Γ₆ and Γ₇a. This is not a free parameter — it is fully determined by the SOC+CF eigenbasis. It enters `sz_op = [1, −1, η, −η]` and propagates to all magnetization and Weiss-field calculations via `sz_bdg16`.
+
+- **Orbital weights `_w6_xz`, `_w6_yz`, `_w6_xy`, `_w7_xz`, `_w7_yz`, `_w7_xy`:** the d_xz, d_yz, d_xy character of the Γ₆ and Γ₇a Kramers states, used in `J_alpha_beta_Q` to compute the Q-dependent exchange asymmetry `η_J(Q)` (see §5).
+
+When `lambda_soc`, `Delta_tetra`, or `Delta_inplane` are changed on a solver clone (e.g. in Bayesian optimisation), `p.__post_init__()` must be followed by `solver._rebuild_orbital_operators(p)` to keep P₆, P₇, τ₁₆, `sz_op`, and `sz_bdg16` consistent with the new eigenbasis.
 
 ### 2. ZSA Charge-Transfer Superexchange and Weiss Field
 
@@ -131,15 +137,24 @@ lambda_JT = (g_JT² / K_lattice) · chi_tau
 ```
 The viable regime is `0.05 < lambda_JT < 1.0`. `chi_tau = |∂⟨τ_x⟩/∂(g_JT·Q)|` requires Δ≠0 and is zero in the normal state — it is the condensate-specific orbital response.
 
-The full multipolar exchange tensor `J_αβ(Q)` includes the Q-dependent B₁g channel opening via `sinh(2Q/λ)`. The commutator diagnostic `‖[τ_x, H_AFM]‖` measures how strongly the normal-state exchange blocks the B₁g channel.
+The full multipolar exchange tensor `J_αβ(Q)` includes the Q-dependent B₁g channel opening via `sinh(2Q/λ)`, plus a Q-dependent exchange asymmetry `η_J(Q)` between Γ₆ and Γ₇:
+
+```
+η_J(Q) = √(J_Γ₇ / J_Γ₆)    where J_Γ₇/J_Γ₆ comes from orbital-selective hopping
+```
+
+Superexchange `J ∝ t²` is orbital-selective: d_xz hops only along x, d_yz only along y, d_xy along both. When `tx ≠ ty` (Q ≠ 0), the Γ₆ (xz-dominant) and Γ₇ (yz-dominant) sectors feel different effective exchanges. `η_J(Q)` is computed from the orbital weights `_w6_xz` etc. stored in `__post_init__`; at Q=0 it equals exactly 1.0.
+
+The commutator diagnostic `‖[τ_x, H_AFM]‖` measures how strongly the normal-state exchange blocks the B₁g channel.
 
 The anisotropic exchange enters the pairing vertex through separate x- and y-direction superexchange couplings:
 
 ```
-J_eff_x ∝ tx²,    J_eff_y ∝ ty²,    J_eff = ½(J_eff_x + J_eff_y)
+J_eff_x ∝ tx²,    J_eff_y ∝ ty²
+J_eff = ½(J_eff_x + J_eff_y)    (scalar for Stoner denominator and Moriya damping)
 ```
 
-The scalar `J_eff` is used for the Moriya/Stoner denominator; anisotropy enters the pairing vertex through `χ_SS(q)` computed from the BdG dispersion with `tx ≠ ty`.
+The scalar `J_eff` is used as the Stoner/Moriya coupling strength (this correctly captures `|J(q_AFM)| = J_x + J_y` at Q=0 where `Jx = Jy`). The full anisotropy enters the pairing vertex through `χ_SS(q)` computed from the BdG dispersion with `tx ≠ ty`, not through a separate q-dependent J in the RPA denominator.
 
 ### 6. Dual B₁g Pairing Channels
 
@@ -227,7 +242,7 @@ The bare susceptibilities χ₀(q) come from the Δ=0 BdG Hamiltonian via the Li
 χ_QQ = −∂²Ω/∂Q²  (numerical, q=0)     # orbital JT stiffness [eV/Å²]
 ```
 
-The cross-terms χ_SQ and χ_QS are **zero in the normal state** (Γ₆–Γ₇ mixing forbidden at Q=0) and become nonzero when Q > 0 opens the B₁g channel via τ_x. The RPA determinant:
+The cross-terms χ_SQ and χ_QS are **zero in the normal state** (Γ₆–Γ₇ mixing forbidden at Q=0) and become nonzero when Q > 0 opens the B₁g channel via τ_x. A dynamic threshold guards against spurious zeroing at Δ≠0: `thr = max(1e−4·√(χ_SS·χ_QQ), χ_SQ_eps)`, which is large when the B₁g channel is active and small when it is suppressed, preventing premature zeroing of a physically open channel. The RPA determinant:
 
 ```
 det = (1 − J_eff·χ_SS)(1 − V_JT·χ_QQ/K) − J_eff·V_JT·χ_SQ·χ_QS
@@ -268,7 +283,7 @@ G3 = ┌ 1 − gVs·χ_ss     −√(gVs·gVd)·χ_sd   −cs·χ_sQ ┐
      └ −cs·χ_Qs          −cd·χ_Qd        1 − χ_QQ/K_eff ┘
 ```
 
-where `cs = √(gVs/K_eff)`, `cd = √(gVd/K_eff)`. The rigidity computation uses `μ_n` from the analytic 2-band model as the chemical potential, ensuring the BdG is evaluated at the correct Fermi level.
+where `cs = √(gVs/K_eff)`, `cd = √(gVd/K_eff)`. The rigidity computation uses `μ_n` from the analytic 2-band model as the chemical potential, ensuring the BdG is evaluated at the correct Fermi level. The Hessian finite-difference step for the Q direction uses `eps_Q = max(5e-3·λ_hop, |Q|·1e-3·λ_hop)` — the floor of ~6.4×10⁻³ Å ensures signal/noise ≫ 1 even at Q=0, where a smaller step would be dominated by LAPACK numerical noise.
 
 **Interpretation of `λ_min` and `G22` depending on evaluation context:**
 
@@ -326,7 +341,7 @@ Computed analytically from a single BdG diagonalization via second-order perturb
 | Observable | Formula |
 |---|---|
 | Density | ⟨c†c⟩ = Σ_n [\|u_n\|² f(E_n) + \|v_n\|² (1−f(E_n))], divided by 4 |
-| Magnetization | ⟨S_z⟩ using orbital-dependent sz = [+1, −1, +η, −η] |
+| Magnetization | ⟨S_z⟩ using `sz_op = [+1, −1, +η, −η]` where η is derived from SOC+CF eigenvectors |
 | Quadrupole ⟨τ_x⟩ | Σ_n [2 Re(u†_{Γ₆} u_{Γ₇}) f + 2 Re(v†_{Γ₆} v_{Γ₇})(1−f)] |
 | Pairing s | F_AA = u_A[6↑] · v_A[7↓]* − u_A[6↓] · v_A[7↑]* (on-site) |
 | Pairing d | F_AB = u_A[6↑] · v_B[7↓]* − u_A[6↓] · v_B[7↑]* (inter-site, φ(k) weight) |
@@ -375,9 +390,11 @@ V_d_scalar = φ · V_mat · φ / φ²      (φ_k = cos kx − cos ky)
 ```
 ModelParams  (dataclass, __post_init__)
     ├── Primary: t_pd, u, lambda_soc, Delta_tetra, g_JT, K_lattice,
-    │            lambda_hop, eta, Delta_inplane, Delta_CT, omega_JT,
+    │            lambda_hop, Delta_inplane, Delta_CT, omega_JT,
     │            mu_LM, ALPHA_HF, Z, nk, kT, a, max_iter, tol, mixing
-    ├── Derived: Delta_CF, t0, U, U_mf, J_CT, doping_0, _U4, U_gamma
+    ├── Derived: Delta_CF, t0, U, U_mf, J_CT, doping_0, _U4, U_gamma,
+    │            eta (from Sz matrix elements), _w6_xz/_w6_yz/_w6_xy,
+    │            _w7_xz/_w7_yz/_w7_xy (orbital character weights for η_J(Q))
     └── Grid objects: k_points, k_points_even, k_weights, k_weights_even,
                       chi0_Q_idx, shift_table, N_k, N_k_even
 
@@ -497,7 +514,7 @@ Anderson(5)-accelerated iteration over (M, Q, Δ_s, Δ_d, μ):
 9. Find μ to enforce `⟨n⟩ = 1 − δ`; compute F_BdG and F_cluster diagnostics.
 10. Adaptive mixing every 5 iters: halve α on divergence, recover ×1.35 on progress; cap α near QCP (×0.6); reset Anderson history on divergence or Q sign flip.
 
-After convergence: post-convergence Hessian test (3×3 `∂²F/∂{M,Q,Δ}²`), coherence length ξ/a, SC-triggered JT confirmation via `hessian_lmin_sc < 0`, λ_JT_kernel, ∂λ_pair/∂Q, channel decomposition (λ_s vs λ_d). A Mott filter suppresses the gap if `g_t < 0.10` or `ξ/a < 1.0`.
+After convergence: post-convergence Hessian test (3×3 `∂²F/∂{M,Q,Δ}²`), coherence length ξ/a, SC-triggered JT confirmation via `hessian_lmin_sc < 0`, λ_JT_kernel, ∂λ_pair/∂Q, channel decomposition (λ_s vs λ_d). A Mott filter suppresses the gap if `g_t < 0.10` or `ξ/a < 1.0`. The return dict includes `gap_vector`, `fs_pts`, `lambda_max_raw`, `g_delta_dom`, `V_spin_mean`, `V_JT_mean`, `V_cross_mean`, and `V_rpa_mean` from the post-convergence linearized gap equation, making the full channel decomposition available to the main diagnostic section.
 
 ### Unified Bayesian Optimisation (5D)
 
@@ -521,7 +538,7 @@ After convergence: post-convergence Hessian test (3×3 `∂²F/∂{M,Q,Δ}²`), 
 
 **Soft constraints / DE penalty (S1–S4, weights sum to 1.0):**
 - S1 (w=0.25): `0 < λ_min(G3) < 0.15` — near-critical, not past QCP
-- S2 (w=0.25): `0.30 < λ_max(gap eq.) < 0.95` — sigmoid soft penalty on linearised gap eigenvalue
+- S2 (w=0.25): monotonic reward for larger λ_max; only penalises near-divergence (λ_max > 0.95) and numerically unsolvable cases — small λ_max in the normal state is not penalised, consistent with the first-order transition hypothesis
 - S3 (w=0.20): `λ_JT > 0.05` — SC-JT coupling above threshold (`λ_JT = χ_QQ/K_bare`)
 - S4 (w=0.30): `∂λ_pair/∂Q > 0` — JT renormalises V_pair upward
 
@@ -543,15 +560,14 @@ All energies in **eV**, lengths in **Å**.
 
 | Parameter | Symbol | Default | Description |
 |---|---|---|---|
-| `t_pd` | t_pd | 0.525 eV | pd hybridisation integral (primary hopping; t₀ derived) |
-| `u` | u | 11.5 | U/t₀ ratio; Hubbard U = u·t₀ |
-| `lambda_soc` | λ_SOC | 0.200 eV | Atomic SOC constant (t₂g shell) |
-| `Delta_tetra` | Δ_tet | −0.255 eV | Tetragonal CF (**required < 0**); Δ_CF derived |
-| `g_JT` | g_JT | 0.255 eV/Å | Electron–phonon JT coupling |
-| `K_lattice` | K | 1.500 eV/Å² | Bare phonon stiffness; K_eff computed at runtime |
+| `t_pd` | t_pd | 0.495 eV | pd hybridisation integral (primary hopping; t₀ derived) |
+| `u` | u | 15.5 | U/t₀ ratio; Hubbard U = u·t₀ |
+| `lambda_soc` | λ_SOC | 0.215 eV | Atomic SOC constant (t₂g shell) |
+| `Delta_tetra` | Δ_tet | −0.140 eV | Tetragonal CF (**required < 0**); Δ_CF derived |
+| `g_JT` | g_JT | 0.230 eV/Å | Electron–phonon JT coupling |
+| `K_lattice` | K | 1.200 eV/Å² | Bare phonon stiffness; K_eff computed at runtime |
 | `lambda_hop` | λ_hop | 1.280 Å | Hopping decay: t(Q) = t₀·exp(±Q/λ) |
-| `eta` | η | 0.220 | Γ₇ AFM asymmetry |
-| `Delta_CT` | Δ_CT | 2.600 eV | Charge-transfer gap (material-class constant) |
+| `Delta_CT` | Δ_CT | 2.000 eV | Charge-transfer gap (material-class constant) |
 | `Delta_inplane` | Δ_ip | 0.050 eV | B₂g in-plane CF; splits Γ₇ doublet |
 | `omega_JT` | ω_JT | 0.057 eV | JT phonon frequency (~46 meV) |
 | `mu_LM` | — | 4.5 | LM regularization floor for M Newton step |
@@ -567,6 +583,8 @@ All energies in **eV**, lengths in **Å**.
 | Parameter | Formula | Description |
 |---|---|---|
 | `Delta_CF` | from SOC+CF diag. | Γ₆–Γ₇ splitting (not a free parameter) |
+| `eta` | `\|⟨Γ₇\|S_z\|Γ₇⟩\| / \|⟨Γ₆\|S_z\|Γ₆⟩\|` | Γ₇ AFM asymmetry (derived from eigenvectors, not a free parameter) |
+| `_w6_xz` … `_w7_xy` | from eigenvector projections | d_xz/d_yz/d_xy orbital weights of Γ₆, Γ₇a; used for Q-dependent `η_J(Q)` in exchange tensor |
 | `t0` | t_pd²/Δ_CT | Effective dd hopping |
 | `J_CT` | 2t_pd⁴/Δ_CT²·(1/U+1/(Δ_CT+U/2)) | ZSA CT superexchange |
 | `U_mf` | Z·J_CT/2 | Bare Weiss-field amplitude (g_J·(1−δ) applied at runtime) |
@@ -576,11 +594,11 @@ All energies in **eV**, lengths in **Å**.
 
 | Parameter | Bounds |
 |---|---|
-| `Delta_tetra` | (−0.30, −0.06) eV |
-| `lambda_soc` | (0.09, 0.24) eV |
-| `u` | (10.0, 20.0) |
-| `g_JT` | (0.19, 0.27) eV/Å |
-| `t_pd` | (0.42, 0.68) eV |
+| `Delta_tetra` | (−0.21, −0.05) eV |
+| `lambda_soc` | (0.12, 0.26) eV |
+| `u` | (11.0, 20.0) |
+| `g_JT` | (0.18, 0.26) eV/Å |
+| `t_pd` | (0.40, 0.62) eV |
 
 ### SC+JT Coexistence Conditions
 
