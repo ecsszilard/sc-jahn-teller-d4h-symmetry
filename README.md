@@ -258,13 +258,13 @@ The bare susceptibilities χ₀(q) come from the Δ=0 BdG Hamiltonian via the Li
 χ_QQ = −∂²Ω/∂Q²  (numerical, q=0)     # orbital JT stiffness [eV/Å²]
 ```
 
-The cross-terms χ_SQ and χ_QS are **zero in the normal state** (Γ₆–Γ₇ mixing forbidden at Q=0) and become nonzero when Q > 0 opens the B₁g channel via B1g_op. A soft tanh gate regularizes χ_SQ:
+The cross-terms χ_SQ and χ_QS are **zero in the normal state** (Γ₆–Γ₇ mixing forbidden at Q=0) and become nonzero when Q > 0 opens the B₁g channel via B1g_op. A Padé resummation regularizes χ_SQ:
 
 ```
-χ_SQ_v = χ_SQ · tanh(|χ_SQ| / w)
+χ_SQ_v = χ_SQ / (1 + |χ_SQ| / w)
 ```
 
-where `w` is adaptive (geometric mean of χ_SS and χ_QQ, widened by the gap amplitude when Δ > threshold). This is linear at small |χ_SQ| — continuously suppressing noise — and saturates to χ_SQ at large |χ_SQ|, replacing the previous hard threshold. χ_QQ is regularized via soft Dyson resummation:
+where `w = _CHI_SQ_PADE_W = 0.10`. This is linear at |χ_SQ| ≪ w — continuously suppressing noise — and saturates asymptotically to ±w at large |χ_SQ|, with a smooth gradient near the QCP. χ_QQ is regularized via soft Dyson resummation:
 
 ```
 χ_QQ_eff = χ_QQ / (1 + χ_QQ · V_JT / K_bare)
@@ -428,7 +428,7 @@ V_d_scalar = φ · V_mat · φ / φ²      (φ_k = cos kx − cos ky)
 ModelParams  (dataclass, __post_init__)
     ├── Primary: t_pd, u, lambda_soc, Delta_tetra, g_JT, K_lattice,
     │            lambda_hop, Delta_inplane, Delta_CT, omega_JT, Z, kT, a, tol
-    ├── Derived: Delta_CF, t0, U, U_mf, J_CT, doping_0, _U4, U_gamma,
+    ├── Derived: Delta_CF, g7split, t0, U, U_mf, J_CT, doping_0, _U4, U_gamma,
     │            eta (from Sz matrix elements), _w6_xz/_w6_yz/_w6_xy,
     │            _w7_xz/_w7_yz/_w7_xy (orbital character weights for η_J(Q))
     └── Grid objects: k_points, k_points_even, k_weights, k_weights_even,
@@ -610,16 +610,16 @@ All energies in **eV**, lengths in **Å**.
 | Parameter | Symbol | Default | Description |
 |---|---|---|---|
 | `t_pd` | t_pd | 0.495 eV | pd hybridisation integral (primary hopping; t₀ derived) |
-| `u` | u | 15.0 | U/t₀ ratio; Hubbard U = u·t₀ |
-| `lambda_soc` | λ_SOC | 0.215 eV | Atomic SOC constant (t₂g shell) |
-| `Delta_tetra` | Δ_tet | −0.140 eV | Tetragonal CF (**required < 0**); Δ_CF derived |
-| `g_JT` | g_JT | 0.220 eV/Å | Electron–phonon JT coupling |
-| `K_lattice` | K | 1.300 eV/Å² | Bare phonon stiffness; K_eff computed at runtime |
+| `u` | u | 16.0 | U/t₀ ratio; Hubbard U = u·t₀ |
+| `lambda_soc` | λ_SOC | 0.185 eV | Atomic SOC constant (t₂g shell) |
+| `Delta_tetra` | Δ_tet | −0.090 eV | Tetragonal CF (**required < 0**); Δ_CF derived |
+| `g_JT` | g_JT | 0.250 eV/Å | Electron–phonon JT coupling |
+| `K_lattice` | K | 0.400 eV/Å² | Bare phonon stiffness; K_eff computed at runtime |
 | `lambda_hop` | λ_hop | 1.280 Å | Hopping decay: t(Q) = t₀·exp(±Q/λ) |
 | `Delta_CT` | Δ_CT | 2.000 eV | Charge-transfer gap (material-class constant) |
-| `Delta_inplane` | Δ_ip | 0.025 eV | B₂g in-plane CF; splits Γ₇ doublet |
+| `Delta_inplane` | Δ_ip | 0.040 eV | B₂g in-plane CF; splits Γ₇ doublet |
 | `omega_JT` | ω_JT | 0.057 eV | JT phonon frequency (~46 meV) |
-| `kT` | kT | 0.015 eV | Temperature (~174 K) |
+| `kT` | kT | 0.010 eV | Temperature (~116 K) |
 | `tol` | — | 1e-4 | Convergence threshold |
 
 ### Module-level SCF constants
@@ -635,13 +635,14 @@ These are fixed at compile time and not Bayesian-optimised:
 | `_ALPHA_HF` | 0.2 | Newton vs BdG fixpoint blend for M |
 | `_MORIYA_C` | 0.35 | Moriya damping prefactor α_M = C·δ·(t_eff/J_eff) |
 | `_LAMBDA_JT_VIABLE` | 0.05 | Minimum λ_JT_sc for SC-triggered JT viability |
-| `_CHI_SQ_TANH_W` | 0.10 | Soft tanh gate width for χ_SQ threshold |
+| `_CHI_SQ_PADE_W` | 0.10 | Padé regularisation width for χ_SQ: χ_SQ_v = χ_SQ / (1 + |χ_SQ|/w) |
 
 ### Derived Parameters (from `__post_init__`)
 
 | Parameter | Formula | Description |
 |---|---|---|
 | `Delta_CF` | from SOC+CF diag. | Γ₆–Γ₇ splitting (not a free parameter) |
+| `g7split` | from SOC+CF diag. | Γ₇a–Γ₇b internal splitting |
 | `eta` | `\|⟨Γ₇\|S_z\|Γ₇⟩\| / \|⟨Γ₆\|S_z\|Γ₆⟩\|` | Γ₇ AFM asymmetry (derived from eigenvectors) |
 | `_w6_xz` … `_w7_xy` | from eigenvector projections | d_xz/d_yz/d_xy orbital weights of Γ₆, Γ₇a; used for Q-dependent `η_J(Q)` in exchange tensor |
 | `t0` | t_pd²/Δ_CT | Effective dd hopping |
@@ -653,11 +654,11 @@ These are fixed at compile time and not Bayesian-optimised:
 
 | Parameter | Bounds |
 |---|---|
-| `Delta_tetra` | (−0.21, −0.05) eV |
-| `lambda_soc` | (0.12, 0.26) eV |
+| `Delta_tetra` | (−0.22, −0.07) eV |
+| `lambda_soc` | (0.13, 0.26) eV |
 | `u` | (11.0, 20.0) |
 | `g_JT` | (0.19, 0.27) eV/Å |
-| `t_pd` | (0.40, 0.62) eV |
+| `t_pd` | (0.40, 0.60) eV |
 
 ### SC+JT Coexistence Conditions
 
@@ -696,7 +697,7 @@ python Quantum_AFM-multipolar_Jahn-Teller.py
 
 On startup:
 1. SOC+CF diagonalization → Δ_CF, k-grids, `shift_table`, orbital operators (B1g_op, B1g_16).
-2. `solver.summary(target_doping, M0)` — all derived parameters and pre-SCF diagnostics.
+2. `solver.summary(target_doping)` — all derived parameters and pre-SCF diagnostics.
 3. Reference SCF at default parameters → self-consistent (M, μ) for diagnostics.
 4. `compute_G_instability()` at self-consistent M + `check_sc_jt_window()` with χ_τ_sc from post-SCF.
 5. Linearized gap equation and channel decomposition from SCF result dict.
