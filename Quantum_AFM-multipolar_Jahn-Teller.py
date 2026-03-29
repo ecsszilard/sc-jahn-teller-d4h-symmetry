@@ -1575,7 +1575,7 @@ class RMFT_Solver:
             S_term = 0.0
 
         # Elastic energy uses the full effective spring constant (K_eff = K_lattice + ∂²F_ex/∂Q²).
-        elastic_energy = 0.5 * _K_eff * Q**2
+        elastic_energy = 0.5 * K_eff_for_free_energy * Q**2
 
         # Condensation correction: |Δ_ℓ|² / (g_ℓ · V_ℓ)
         _, _, g_s, g_d = self.p.get_gutzwiller_factors(target_doping)
@@ -1641,7 +1641,7 @@ class RMFT_Solver:
         Q_fluct = np.sqrt(max(0.0, 0.5 * ((Q2_A - Q_A**2) + (Q2_B - Q_B**2))))
 
         # J_eff extraction from full cluster spectrum
-        O_AB = np.kron(self.p.multi_op, self.multi_op)   # spin-spin correlation operator
+        O_AB = np.kron(self.multi_op, self.multi_op)   # spin-spin correlation operator
         corr_vals = np.sum(evecs.conj() * (O_AB @ evecs), axis=0).real
 
         # Boltzmann weights (lowest state has highest weight)
@@ -2010,6 +2010,10 @@ class RMFT_Solver:
             Delta_s_mixed = complex(_Ds_abs_new) * _phase_s
             Delta_d_mixed = complex(_Dd_abs_new) * _phase_d
 
+            # _vertex_cache may be None if the previous iteration triggered a Q sign flip
+            _V_s_now = _vertex_cache['V_s_scalar'] if _vertex_cache is not None else 0.0
+            _V_d_now = _vertex_cache['V_d_scalar'] if _vertex_cache is not None else 0.0
+
             if len(scf_x_hist) > 1 and (Q * Q_mixed < 0):
                 scf_x_hist.clear()
                 scf_f_hist.clear()
@@ -2042,7 +2046,7 @@ class RMFT_Solver:
             # Pass V_s, V_d from vertex cache → consistent with gap equation
             F_bdg = self.compute_bdg_free_energy(
                 M_mixed, Q_mixed, Delta_s_mixed, Delta_d_mixed, target_doping, mu_new,
-                tx_mixed, ty_mixed, g_J, _vertex_cache['V_s_scalar'], _vertex_cache['V_d_scalar'], _K_eff_scf,
+                tx_mixed, ty_mixed, g_J, _V_s_now, _V_d_now, _K_eff_scf,
                 _ev_cache=_mu_bdg_cache[0] if _mu_bdg_cache is not None else None)
 
             F_cluster = self.compute_cluster_free_energy(M_mixed, Q_mixed, mu_new, g_J, tx_mixed_bare, ty_mixed_bare, target_doping)
@@ -2056,8 +2060,12 @@ class RMFT_Solver:
                 abs(Delta_d_abs - abs(Delta_d)),
             )
             
-            # In the AFM-only state: P_eff = P6, ⟨τ_x⟩_P6 = 0 (τ_x off-diagonal). In the SC state Γ₇ is mixing: ⟨τ_x⟩_eff =  |Δ|/Δ_CF·|τ_x_bdg|
-            selection_ratio = float(np.clip((Delta_s_abs + Delta_d_abs) / max(self.p.Delta_CF, 1e-9), 0.0, 1.0)) * abs(tau_x) / max(1.0, 1e-9)
+            # SC-triggered JT selection rule proxy:
+            #   |Δ|/Δ_CF  — condensate mixing of Γ₆↔Γ₇ (0=normal state, 1=full mixing)
+            #   |τ_x|     — anomalous orbital coherence from BdG (dimensionless)
+            selection_ratio = float(np.clip(
+                (Delta_s_abs + Delta_d_abs) / max(self.p.Delta_CF, 1e-9), 0.0, 1.0
+            )) * abs(tau_x)
 
             if iteration >= 5 and iteration % 5 == 0:
                 if max_diff > _max_diff_prev * 1.05:
@@ -2098,10 +2106,15 @@ class RMFT_Solver:
             # QCP detection: FM at q=0 (det_q0) and AFM at q=(π,π) (det_afm).
             # The AFM QCP is the physically relevant instability for SCF steering;
             # the FM check guards against accidental ferromagnetic divergence.
-            _det_q0   = _vertex_cache['det_q0']
-            _det_afm  = _vertex_cache['det_afm']
-            _near_fm_qcp  = (_det_q0  < _RPA_DET_WARN) or (abs(_vertex_cache['V_s_scalar']) > _V_CUT)
-            _near_afm_qcp = (_det_afm < _RPA_DET_WARN) or (abs(_vertex_cache['V_d_scalar']) > _V_CUT)
+            # _vertex_cache may be None after a Q sign-flip; treat as non-critical in that case.
+            if _vertex_cache is not None:
+                _det_q0   = _vertex_cache['det_q0']
+                _det_afm  = _vertex_cache['det_afm']
+                _near_fm_qcp  = (_det_q0  < _RPA_DET_WARN) or (abs(_vertex_cache['V_s_scalar']) > _V_CUT)
+                _near_afm_qcp = (_det_afm < _RPA_DET_WARN) or (abs(_vertex_cache['V_d_scalar']) > _V_CUT)
+            else:
+                _det_q0 = _det_afm = 1.0   # unknown → assume stable
+                _near_fm_qcp = _near_afm_qcp = False
             _tol_use = self.p.tol * (5.0 if _near_afm_qcp else 1.0)
             if _near_afm_qcp:
                 # Cap alpha near AFM QCP: large steps overshoot the near-singular gap vertex
@@ -2259,7 +2272,10 @@ class RMFT_Solver:
                     target_doping, mu, tx_mixed, ty_mixed, g_J,
                     out=_vbdg_conv._H_stack))
             hessian_result = self.compute_hessian(
-                M, Q, _Delta_total, target_doping, mu, g_t, g_J, _Delta_s_frac, _vertex_cache['V_s_scalar'], _vertex_cache['V_d_scalar'], _K_eff_scf, _ev_conv_cache)
+                M, Q, _Delta_total, target_doping, mu, g_t, g_J, _Delta_s_frac,
+                _vertex_cache['V_s_scalar'] if _vertex_cache is not None else 0.0,
+                _vertex_cache['V_d_scalar'] if _vertex_cache is not None else 0.0,
+                _K_eff_scf, _ev_conv_cache)
             
             # 2. Coherence length, uses converged (M, Q, Δ, μ, tx, ty).
             try:
@@ -2411,7 +2427,7 @@ class RMFT_Solver:
                      f"  [{_xi_res['note']}]")
             _scf_log(_tag,
                      f"χ_AFM={chi0_result['chi_DD_s']:.4f}  χ_moriya={_chi_m:.4f}"
-                     f"  J·χ={_J_ex*_chi_m:.4f}  det_AFM={_vertex_cache['det_afm']:.4f}"
+                     f"  J·χ={_J_ex*_chi_m:.4f}  det_AFM={_vertex_cache['det_afm'] if _vertex_cache is not None else float('nan'):.4f}"
                      f"  {'⚠ near QCP' if _J_ex*_chi_m >= 0.7 else '✓ stable'}"
                      f"  j_renorm={self._cluster_j_renorm:.3f}")
 
@@ -3764,11 +3780,11 @@ def check_sc_jt_window(params: ModelParams, result: Dict, G_base: Dict) -> Dict:
     Delta_CF   = params.Delta_CF
     K_lattice  = params.K_lattice
 
-    delta_chi_tau = float(result.get('delta_chi_tau', 0.0))
-    chi_tau_sc    = float(result.get('chi_tau_sc', 0.0))
-    chi_tau_n     = float(result.get('chi_tau_n', 0.0))
-    Delta_s       = float(result.get('Delta_s', 0.0))
-    Delta_d       = float(result.get('Delta_d', 0.0))
+    delta_chi_tau = float(result['delta_chi_tau'])
+    chi_tau_sc    = float(result['chi_tau_sc'])
+    chi_tau_n     = float(result['chi_tau_n'])
+    Delta_s       = float(result['Delta_s'])
+    Delta_d       = float(result['Delta_d'])
 
     chi0       = G_base['chi_QQ'] / max(g_JT**2, 1e-12)
     K_eff      = G_base['K_eff']
@@ -5182,7 +5198,7 @@ if __name__ == "__main__":
         _ref_M     = _ref_result['M']
         _ref_Q     = _ref_result['Q']
         _ref_mu    = _ref_result['mu']
-        _scf_log("REF-SCF", f"  converged={_ref_result['converged']}  mott_suspect={_ref_result.get('mott_suspect', False)}")
+        _scf_log("REF-SCF", f"  converged={_ref_result['converged']}  mott_suspect={_ref_result['mott_suspect']}")
         _scf_log("REF-SCF", f"  M={_ref_M:.4f}  Q={_ref_Q:+.5f}  Δs={_ref_result['Delta_s']:.5f} eV  Δd={_ref_result['Delta_d']:.5f} eV  μ={_ref_mu:.4f} eV  g_t={_ref_result['g_t'] :.3f}")
         _scf_log("REF-SCF", f"  Irrep R={_ref_result['selection_ratio']:.4f}  JT {'ALLOWED ✓' if _ref_result['selection_ratio'] > 0.05 else 'BLOCKED ✗'}")
     except Exception as _ref_err:
@@ -5221,86 +5237,105 @@ if __name__ == "__main__":
              f"{'✓ normal-state Q-stable' if G_base['d2F_Q_normal'] > 0 else '✗ spontaneous JT!'}")
     _scf_log("G-MATRIX", f"||[τ_x,H]||={G_base['comm_norm']:.4f} eV  blocking={G_base['blocking_ratio']:.4f}")
 
-    # ── Section 3: Linearised gap equation result — from SCF result dict ────
-    _lmax_ref  = float(_ref_result.get('lambda_max', float('nan')))  if _ref_result else float('nan')
-    _gsym_ref  = _ref_result.get('gap_symmetry', '?')                if _ref_result else '?'
-    _lraw_ref  = float(_ref_result.get('lambda_max_raw', float('nan'))) if _ref_result else float('nan')
-    _gdel_ref  = float(_ref_result.get('g_delta_dom', float('nan')))    if _ref_result else float('nan')
-    _V_spin    = float(_ref_result.get('V_spin_mean',  float('nan')))   if _ref_result else float('nan')
-    _V_JT      = float(_ref_result.get('V_JT_mean',   float('nan')))   if _ref_result else float('nan')
-    _V_cr      = float(_ref_result.get('V_cross_mean', float('nan')))   if _ref_result else float('nan')
-    _V_tot     = float(_ref_result.get('V_rpa_mean',  float('nan')))   if _ref_result else float('nan')
-    _gap_vec   = _ref_result.get('gap_vector', None) if _ref_result else None
-    _fs_pts    = _ref_result.get('fs_pts', None)     if _ref_result else None
+    # ── Sections 3: SCF diagnostics, SC-JT window, Tc pre-estimates ────────
+    if _ref_result is not None:
+        _lmax_ref = float(_ref_result['lambda_max'])
+        _lraw_ref = float(_ref_result['lambda_max_raw'])
+        _gdel_ref = float(_ref_result['g_delta_dom'])
+        _gsym_ref = _ref_result['gap_symmetry']
+        _V_spin   = float(_ref_result['V_spin_mean'])
+        _V_JT     = float(_ref_result['V_JT_mean'])
+        _V_cr     = float(_ref_result['V_cross_mean'])
+        _V_tot    = float(_ref_result['V_rpa_mean'])
+        _gap_vec  = _ref_result.get('gap_vector', None)  # numpy array
+        _fs_pts   = _ref_result.get('fs_pts',     None)  # numpy array
 
-    _scf_log("G-MATRIX", "Linearised gap equation (from SCF; full RPA vertex, self-consistent M and μ):")
-    _scf_log("G-MATRIX", f"  λ_max={_lmax_ref:.4f} (raw={_lraw_ref:.4f}"
-             f"  × g_Δ={_gdel_ref:.3f})  sym={_gsym_ref}")
-    if _gap_vec is not None and _fs_pts is not None:
-        _phi_s = np.ones(len(_fs_pts)); _phi_s /= np.linalg.norm(_phi_s)
-        _phi_d = np.cos(_fs_pts[:,0]) - np.cos(_fs_pts[:,1])
-        _nd = np.linalg.norm(_phi_d)
-        if _nd > 1e-10: _phi_d /= _nd
-        _w_s = float(abs(_gap_vec @ _phi_s))
-        _w_d = float(abs(_gap_vec @ _phi_d))
-        _norm = max(_w_s + _w_d, 1e-10)
-        _ls = _lmax_ref * _w_s / _norm
-        _ld = _lmax_ref * _w_d / _norm
+        _scf_log("G-MATRIX", "Linearised gap equation (from SCF; full RPA vertex, self-consistent M and μ):")
+        _scf_log("G-MATRIX", f"  λ_max={_lmax_ref:.4f} (raw={_lraw_ref:.4f}"
+                 f"  × g_Δ={_gdel_ref:.3f})  sym={_gsym_ref}")
+        if _gap_vec is not None and _fs_pts is not None:
+            _phi_s = np.ones(len(_fs_pts)); _phi_s /= np.linalg.norm(_phi_s)
+            _phi_d = np.cos(_fs_pts[:,0]) - np.cos(_fs_pts[:,1])
+            _nd = np.linalg.norm(_phi_d)
+            if _nd > 1e-10: _phi_d /= _nd
+            _w_s = float(abs(_gap_vec @ _phi_s))
+            _w_d = float(abs(_gap_vec @ _phi_d))
+            _norm = max(_w_s + _w_d, 1e-10)
+            _ls = _lmax_ref * _w_s / _norm
+            _ld = _lmax_ref * _w_d / _norm
+            _ch_note  = 'd-wave dominant' if _w_d > _w_s else 's-wave dominant'
+            _neg_note = ('  [⚠ λ<0: FS-avg vertex repulsive — instability requires nodal sign change]'
+                         if _lmax_ref < 0 else '')
+            _scf_log("G-MATRIX", f"  Channel decomp: λ_s={_ls:.4f}  λ_d={_ld:.4f}"
+                     f"  [{_ch_note}]{_neg_note}")
+        
         # d-wave: negative FS-average is EXPECTED because forward scattering q≈0 is repulsive and dominates the mean;
         # the instability comes from backscattering at q≈(π,π) which is captured by the dominant eigenvector
-        _ch_note = ('d-wave dominant' if _w_d > _w_s else 's-wave dominant')
-        _neg_note = ('  [⚠ λ<0: FS-avg vertex repulsive — instability requires nodal sign change]'
-                     if _lmax_ref < 0 else '')
-        _scf_log("G-MATRIX", f"  Channel decomp: λ_s={_ls:.4f}  λ_d={_ld:.4f}"
-                 f"  [{_ch_note}]{_neg_note}")
+        if np.isfinite(_V_tot) and abs(_V_tot) > 1e-4:
+            _v_note = ('⚠ V_avg<0: d-wave backscattering dominant (normal)' if _V_tot < 0
+                       else '✓ positive avg')
+            _scf_log("G-MATRIX", f"  V_RPA(FS-avg)={_V_tot:.4f} eV  [{_v_note}]"
+                     f"  spin={_V_spin/_V_tot*100:.0f}%  JT={_V_JT/_V_tot*100:.0f}%"
+                     f"  cross={_V_cr/_V_tot*100:.0f}%")
+        elif np.isfinite(_V_tot):
+            _scf_log("G-MATRIX", f"  V_RPA(FS-avg)={_V_tot:.2e} eV"
+                     f"  [spin={_V_spin:.3f}  V_JT={_V_JT:.3f}  cross={_V_cr:.3f} eV]")
 
-    # Moriya/Stoner diagnostic — G-matrix (analytic 2-band) vs exact BdG χ_AFM
-    if np.isfinite(_V_tot) and abs(_V_tot) > 1e-4:
-        _v_note = ('⚠ V_avg<0: d-wave backscattering dominant (normal)' if _V_tot < 0
-                   else '✓ positive avg')
-        _scf_log("G-MATRIX", f"  V_RPA(FS-avg)={_V_tot:.4f} eV  [{_v_note}]"
-                 f"  spin={_V_spin/_V_tot*100:.0f}%  JT={_V_JT/_V_tot*100:.0f}%"
-                 f"  cross={_V_cr/_V_tot*100:.0f}%")
-    elif np.isfinite(_V_tot):
-        _scf_log("G-MATRIX", f"  V_RPA(FS-avg)={_V_tot:.2e} eV"
-                 f"  [spin={_V_spin:.3f}  V_JT={_V_JT:.3f}  cross={_V_cr:.3f} eV]")
+        # — Stoner/Moriya diagnostic: G-matrix (analytic) vs exact BdG χ_AFM —
+        _stoner_g    = G_base['J_eff'] * G_base['chi_DD_s_moriya']
+        _ston_status = ('✓ near QCP' if 1.0 > _stoner_g > 0.7
+                        else ('⚠ near/past AFM QCP' if 2.0 > _stoner_g >= 1.0
+                              else ('safe' if _stoner_g <= 0.7 else '✗ deeply past QCP')))
+        _scf_log("G-MATRIX", f" J_eff={G_base['J_eff']:.4f} χ_moriya={G_base['chi_DD_s_moriya']:.4f} J·χ={_stoner_g:.4f} [{_ston_status}]")
 
-    _stoner_g    = G_base['J_eff'] * G_base['chi_DD_s_moriya']
-    _ston_status = ('✓ near QCP' if 1.0 > _stoner_g > 0.7
-                    else ('⚠ near/past AFM QCP' if 2.0 > _stoner_g >= 1.0
-                          else ('safe' if _stoner_g <= 0.7 else '✗ deeply past QCP')))
-    _scf_log("G-MATRIX", f" J_eff={G_base['J_eff']:.4f} χ_moriya={G_base['chi_DD_s_moriya']:.4f} J·χ={_stoner_g:.4f} [{_ston_status}]")
-    if _ref_result:
-        J_eff = _ref_result['J_eff']
-        _scf_log("SCF RES ", f"J_eff={J_eff:.4f}")
-        _scf_log("compute_static_chi0_afm RES ", f" χ_DD_s={_ref_result['chi_DD_s']:.4f}  χ_moriya={_ref_result['chi_DD_s_moriya']:.4f}  J·χ={_ref_result['chi_DD_s_moriya'] * J_eff:.4f}")
+        _J_eff_ref = _ref_result['J_eff']
+        _scf_log("SCF RES ", f"J_eff={_J_eff_ref:.4f}")
+        _scf_log("compute_static_chi0_afm RES ", f" χ_DD_s={_ref_result['chi_DD_s']:.4f}  χ_moriya={_ref_result['chi_DD_s_moriya']:.4f}  J·χ={_ref_result['chi_DD_s_moriya'] * _J_eff_ref:.4f}")
         _scf_log("compute_static_chi0_afm RES ", f" RPA×={_ref_result['rpa_factor']:.3f}  {'⚠ near/past QCP' if _ref_result['afm_unstable'] else '✓ stable'}")
-        _scf_log("SCF RES ", f"χ_DD_s_full={_ref_result['chi_DD_s_full']:.4f}  χ_moriya_full={_ref_result['chi_DD_s_moriya_full']:.4f}  J·χ={_ref_result['chi_DD_s_moriya'] * J_eff:.4f}")
+        _scf_log("SCF RES ", f"χ_DD_s_full={_ref_result['chi_DD_s_full']:.4f}  χ_moriya_full={_ref_result['chi_DD_s_moriya_full']:.4f}  J·χ={_ref_result['chi_DD_s_moriya'] * _J_eff_ref:.4f}")
 
-    # ── Section 4: SC-JT window and Tc estimates──────────────────────────────────────
-    #   chi_tau_sc : χ_τ(Δ≠0) — full SC-state B1g susceptibility → used for K_SC
-    #   chi_tau    : δχ_τ = χ_τ(SC) − χ_τ(N) — SC-induced excess → λ_JT post-hoc
-    _jt_win = check_sc_jt_window(params, _ref_result, G_base)
-    _scf_log("G-MATRIX", f"  χ_τ_sc={_ref_result['chi_tau_sc']:.4e} eV⁻¹  δχ_τ={_ref_result['delta_chi_tau']:.4e} eV⁻¹"
-             f"  χ_τ_n={_ref_result['chi_tau_n']:.4e} eV⁻¹")
-    _scf_log("G-MATRIX", f"  K_spont={_jt_win['K_spont']:.4f}  K_SC={_jt_win['K_SC']:.4f}"
-             f"  (λ_JT_viable={_LAMBDA_JT_VIABLE:.2f})"
-             f"  K_opt={_jt_win['K_opt']:.4f}  K_lattice={solver._K_bare:.4f}")
-    _scf_log("G-MATRIX", f"  λ_JT={_jt_win['lambda_JT']:.4f}  λ_JT_sc={_jt_win['lambda_JT_sc']:.4f}"
-             f"  λ_JT_opt={_jt_win['lambda_JT_opt']:.4f}"
-             f"  K_dist={_jt_win['K_distance']:+.3f}"
-             f"  in_window={_jt_win['K_in_window']}  open={_jt_win['window_open']}"
-             f"{'  ⚠ normal-state unstable' if _jt_win['normal_unstable'] else ''}")
-    _scf_log("G-MATRIX", f"  → {_jt_win['note']}")
+        # — SC-JT window (chi_tau keys always present in result dict) —
+        _jt_win = check_sc_jt_window(params, _ref_result, G_base)
+        _scf_log("G-MATRIX", f"  χ_τ_sc={_ref_result['chi_tau_sc']:.4e} eV⁻¹"
+                f"  δχ_τ={_ref_result['delta_chi_tau']:.4e} eV⁻¹"
+                f"  χ_τ_n={_ref_result['chi_tau_n']:.4e} eV⁻¹")
+        _scf_log("G-MATRIX", f"  K_spont={_jt_win['K_spont']:.4f}  K_SC={_jt_win['K_SC']:.4f}"
+                f"  (λ_JT_viable={_LAMBDA_JT_VIABLE:.2f})"
+                f"  K_opt={_jt_win['K_opt']:.4f}  K_lattice={solver._K_bare:.4f}")
+        _scf_log("G-MATRIX", f"  λ_JT={_jt_win['lambda_JT']:.4f}  λ_JT_sc={_jt_win['lambda_JT_sc']:.4f}"
+                f"  λ_JT_opt={_jt_win['lambda_JT_opt']:.4f}"
+                f"  K_dist={_jt_win['K_distance']:+.3f}"
+                f"  in_window={_jt_win['K_in_window']}  open={_jt_win['window_open']}"
+                f"{'  ⚠ normal-state unstable' if _jt_win['normal_unstable'] else ''}")
+        _scf_log("G-MATRIX", f"  → {_jt_win['note']}")
 
-    _pre_mott  = _ref_result.get('mott_suspect', False) if _ref_result else True
-    _pre_xi    = _ref_result.get('xi_over_a', 0.0)     if _ref_result else 0.0
-    _pre_lmax  = _ref_result.get('lambda_max', 0.0)    if _ref_result else 0.0
-    _pre_Delta = ((_ref_result.get('Delta_s', 0.0) + _ref_result.get('Delta_d', 0.0))
-                  if _ref_result else 0.0)
-    _pre_conv  = _ref_result.get('converged', False)   if _ref_result else False
-    _pre_g_t   = _ref_result.get('g_t', 0.0)          if _ref_result else 0.0
-    _sc_viable = (not _pre_mott) and (_pre_g_t >= _G_T_COHERENCE_MIN) and _pre_conv
+        # — Variables used in TC-PRELIM below —
+        _pre_mott  = _ref_result['mott_suspect']
+        _pre_xi    = float(_ref_result['xi_over_a'])
+        _pre_lmax  = float(_ref_result['lambda_max'])
+        _pre_Delta = float(_ref_result['Delta_s']) + float(_ref_result['Delta_d'])
+        _pre_conv  = bool(_ref_result['converged'])
+        _pre_g_t   = float(_ref_result['g_t'])
+        _t_eff2    = float(np.sqrt(0.5 * (max(float(_ref_result['tx']), 1e-9)**2
+                                         + max(float(_ref_result['ty']), 1e-9)**2)))
+        _sc_viable = (not _pre_mott) and (_pre_g_t >= _G_T_COHERENCE_MIN) and _pre_conv
+
+    else:
+        # SCF raised an exception — log minimum diagnostics from G-matrix only.
+        _scf_log("G-MATRIX", "Linearised gap equation: SCF failed — no result available.")
+        _stoner_g    = G_base['J_eff'] * G_base['chi_DD_s_moriya']
+        _ston_status = ('✓ near QCP' if 1.0 > _stoner_g > 0.7
+                        else ('⚠ near/past AFM QCP' if 2.0 > _stoner_g >= 1.0
+                              else ('safe' if _stoner_g <= 0.7 else '✗ deeply past QCP')))
+        _scf_log("G-MATRIX", f" J_eff={G_base['J_eff']:.4f} χ_moriya={G_base['chi_DD_s_moriya']:.4f} J·χ={_stoner_g:.4f} [{_ston_status}]")
+        _pre_mott  = True
+        _pre_xi    = 0.0
+        _pre_lmax  = 0.0
+        _pre_Delta = 0.0
+        _pre_conv  = False
+        _pre_g_t   = 0.0
+        _t_eff2    = params.t0
+        _sc_viable = False
 
     _scf_log("TC-PRELIM", "="*60)
     _scf_log("TC-PRELIM", f"Pre-BO Tc estimates  (δ={target_doping:.3f},"
@@ -5320,29 +5355,26 @@ if __name__ == "__main__":
                 f"  Tc₁(G-BCS):    λ_eff={G_base['lambda_eff']:.4f}"
                 f"  → {G_base['Tc_estimate']*1000:.2f} meV  ({G_base['Tc_estimate'] / 8.617333e-5:.1f} K)")
           
-        _tx2    = _ref_result.get('tx', params.t0) if _ref_result else params.t0
-        _ty2    = _ref_result.get('ty', params.t0) if _ref_result else params.t0
-        _t_eff2 = float(np.sqrt(0.5 * (max(_tx2, 1e-9)**2 + max(_ty2, 1e-9)**2)))
         _omega  = params.omega_JT          # JT phonon energy scale (eV)
-        _cutoff = max(_t_eff2, _omega)       # relevant boson cutoff
+        _cutoff = max(_t_eff2, _omega)     # relevant boson cutoff
         _Tc2_eV = float(1.13 * _cutoff * np.exp(-1.0 / max(_pre_lmax, 1e-9)))
         _scf_log("TC-PRELIM",
                 f"  Tc₂(λ_max-BCS):λ_max={_pre_lmax:.4f}"
                 f"  ω_JT={params.omega_JT*1000:.1f} meV"
                 f"  → {_Tc2_eV*1000:.2f} meV  ({_Tc2_eV / 8.617333e-5:.1f} K)")
 
-    # ── Section 5: Unified 5D optimisation ──────────────────────────────────
+    # ── Section 4: Unified 5D optimisation ──────────────────────────────────
     _scf_log("MAIN", "="*60)
     _scf_log("MAIN", "UNIFIED 5D OPTIMISATION  (DE scout → GP seed → TuRBO → local refine)")
     _scf_log("MAIN", "Search space: (Delta_tetra, lambda_soc, u, g_JT, t_pd)  — no parameter splitting")
     _scf_log("MAIN", "="*60)
 
     _5d_bounds = {
-        'Delta_tetra': (-0.22, -0.07),
-        'lambda_soc':  ( 0.13,  0.26),
-        'u':           ( 11.0,  20.0),
-        'g_JT':        ( 0.19,  0.27),
-        't_pd':        ( 0.40,  0.60),
+        'Delta_tetra': (-0.15, -0.03),
+        'lambda_soc':  ( 0.15,  0.32),
+        'u':           ( 10.0,  20.0),
+        'g_JT':        ( 0.11,  0.24),
+        't_pd':        ( 0.35,  0.60),
     }
 
     unified_bo = UnifiedBayesianOptimizer(solver, n_doping_scan=7)
@@ -5362,7 +5394,7 @@ if __name__ == "__main__":
     best_final = res_unified['best_valid'] or res_unified['best_point']
     all_obs    = res_unified['observations']
 
-    # ── Section 6: Global optimum summary ───────────────────────────────────────────────────
+    # ── Section 5: Global optimum summary ───────────────────────────────────────────────────
     _scf_log("MAIN", "="*60)
     _scf_log("MAIN", f"OPTIMISATION COMPLETE  ({res_unified['elapsed_s']/60:.1f} min total)")
     _scf_log("MAIN", "Global optimal parameters:")
@@ -5449,7 +5481,7 @@ if __name__ == "__main__":
 
     _scf_log("MAIN", "="*60)
 
-    # ── Section 7: Gap=0 diagnosis — from G-matrix and SCF result ───────────
+    # ── Section 6: Gap=0 diagnosis — from G-matrix and SCF result ───────────
     _Delta_opt = _sc_opt['Delta_s'] + _sc_opt['Delta_d']
     _dlam_g   = _G_opt.get('dlambda_pair_dQ', float('nan'))
     _lmax_opt = float(_sc_opt.get('lambda_max', float('nan')))
