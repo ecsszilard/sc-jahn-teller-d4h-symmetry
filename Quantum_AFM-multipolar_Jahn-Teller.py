@@ -183,7 +183,7 @@ class ModelParams:
         # Weiss uses (1−δ); BdG applies g_J = 4/(1+δ)² → 4 (finite).
         _z_ZRS = self.t_pd**2 / (_dct**2 + self.t_pd**2)
         self.doping_0: float = float(_z_ZRS / max(1.0 - _z_ZRS, 1e-9))
-        self.U_mf: float = self.Z * _J_ct / 2.0
+        self.U_mf: float = self.Z * _J_ct / 2.0  # bare Weiss amplitude
         self.J_CT: float = _J_ct
         assert _NK % 2 == 0, f"_NK={_NK} must be even for commensurate q_AFM=(π,π)"
 
@@ -191,14 +191,14 @@ class ModelParams:
         KX_scf, KY_scf = np.meshgrid(k_scf, k_scf)
         self.k_points  = np.column_stack((KX_scf.flatten(), KY_scf.flatten()))
         self.N_k       = len(self.k_points)
-        self.k_weights = _simpson_weights_2d(_NK, _NK)   # uniform 1/N weights (periodic BZ)
+        self.k_weights = _uniform_bz_weights_2d(_NK, _NK)   # uniform 1/N weights (periodic BZ)
 
         # χ₀ even grid — kept separate for the commensurate q_AFM=(π,π) index trick.
         k_even = np.linspace(-np.pi, np.pi, _NK, endpoint=False)
         KX_ev, KY_ev = np.meshgrid(k_even, k_even)
         self.k_points_even  = np.column_stack((KX_ev.flatten(), KY_ev.flatten()))
         self.N_k_even       = len(self.k_points_even)
-        self.k_weights_even = _simpson_weights_2d(_NK, _NK)
+        self.k_weights_even = _uniform_bz_weights_2d(_NK, _NK)
 
         # General shift-index table for ALL q-vectors on the 2π/_NK grid.
         # For q = (nx, ny) * 2π/_NK the k+q grid is a cyclic PERMUTATION of k_even:
@@ -232,7 +232,7 @@ class ModelParams:
         t_eff     = self.t0 * (2.0 * abs_d) / (1.0 + abs_d)
         bandwidth = 8.0 * max(t_eff, 1e-6)
         N0        = 2.0 / bandwidth
-        J_eff     = g_J * self.J_CT
+        J_eff     = g_J * self.Z * self.J_CT
         S         = float(np.clip(J_eff * N0, 0.0, 5.0))
         M_stoner  = float(np.clip(0.18 * (S / max(S, 1.0)) * g_J / 4.0, 0.05, 0.20))
         delta_c   = 0.23
@@ -259,7 +259,7 @@ class ModelParams:
 
         DOUBLE-COUNTING AVOIDANCE
         -------------------------
-        • η-weight (AFM selection rule) is already included in J_alpha_beta_Q → V_d_scalar.
+        • η-weight (AFM selection rule) is already included in _exchange_channels → V_d_scalar.
         • j_renorm (cluster vertex correction) is also applied there.
 
         GUTZWILLER FACTOR
@@ -326,11 +326,14 @@ class ModelParams:
         """
         Gutzwiller-renormalised superexchange (bare, without cluster vertex correction).
 
-        J_bare = g_J · f_J(δ) · J_CT(tx, ty)
+        J_bare = Z · g_J · f_J(δ) · J_CT(tx, ty)
+
+        The factor Z (coordination number) converts the single-bond ZSA exchange
+        J_CT into the full lattice-summed Weiss-field scale
 
         f_J(δ) = max(δ,δ₀) / (max(δ,δ₀) + δ₀)  — ZRS coherence floor.
-            Saturates at f_J=0.5 as δ→0 (ZRS band incoherent but local J survives),
-            Note: g_J·f_J together still give J_eff → g_J(0)·0.5·J_CT = 2·J_CT
+            Saturates at f_J=0.5 as δ→0 (ZRS band incoherent but local J survives).
+            Z·g_J·f_J together give J_eff → Z·g_J(0)·0.5·J_CT = Z·2·J_CT
             at half-filling, consistent with the Mott limit.
         """
         abs_doping = max(abs(doping), 1e-6)
@@ -338,7 +341,7 @@ class ModelParams:
         f_J  = d_fl / (d_fl + self.doping_0)           # ∈ [0.5, 1)
         _dct = max(self.Delta_CT, 1e-9)
         _U   = max(self.U, 1e-9)
-        return g_J * f_J * (tx_bare**2 + ty_bare**2) * (1.0/_U + 1.0/(_dct + _U/2.0))
+        return self.Z * g_J * f_J * (tx_bare**2 + ty_bare**2) * (1.0/_U + 1.0/(_dct + _U/2.0))
     
     def build_multipolar_operator(self) -> np.ndarray:
         P6_diag = np.array([1.0, 1.0, 0.0, 0.0])    # Projects to 6↑, 6↓
@@ -361,7 +364,7 @@ class ModelParams:
         t_sq_aniso  = 0.5 * (_tx_r**2 + _ty_r**2)
         f_d         = 1.0 - target_doping
         scale_A1g   = float(np.cosh(2.0 * _Q_rep / max(self.lambda_hop, 1e-9)))
-        h_afm_M0    = g_J * f_d * self.J_CT * scale_A1g * supposed_M
+        h_afm_M0    = self.Z * g_J * f_d * self.J_CT * scale_A1g * supposed_M
         t_eff_aniso = g_t * np.sqrt(t_sq_aniso)
         metal_ok    = h_afm_M0 < 2.0 * t_eff_aniso
 
@@ -413,7 +416,7 @@ def _build_soc_cf_hamiltonian(lambda_soc: float, Delta_tetra: float, Delta_inpla
             + Delta_inplane * (Lx_f @ Lx_f - Ly_f @ Ly_f))
     return H_SOC + H_CF
 
-def _simpson_weights_2d(nx: int, ny: int) -> np.ndarray:
+def _uniform_bz_weights_2d(nx: int, ny: int) -> np.ndarray:
     """
     BZ integration weights for a 2D periodic endpoint=False k-grid.
 
@@ -451,23 +454,24 @@ class ClusterMF:
         self.CLUSTER_SIZE = 2
         self.Z_BOUNDARY = Z - 1  # One link is within cluster, Z-1 are boundary
     
-    def build_cluster_hamiltonian(self, H_sp_A: np.ndarray, H_sp_B: np.ndarray, J_eff: float, M_ext: float, U_mf_stoner: float = 0.0) -> np.ndarray:
+    def build_cluster_hamiltonian(self, H_sp_A: np.ndarray, H_sp_B: np.ndarray, J_eff: float, M_ext: float) -> np.ndarray:
         """
         H_cluster = H_sp(A) ⊗ I + I ⊗ H_sp(B)               [single-particle terms]
                   + J·O_A⊗O_B                                [intra-cluster multipolar exchange]
                   + H_boundary(A) ⊗ I + I ⊗ H_boundary(B)   [inter-cluster MF]
 
-          - J_eff:          Gutzwiller-renormalised Heisenberg superexchange: ZSA charge-transfer superexchange + kinematic dd-exchange
-          - U_mf_stoner/2:  Stoner (on-site Hubbard) contribution to the Weiss field;
-                            consistent with BdG h_afm = g_J·f_d·(U_mf/2 + Z·2t²/U)·M/2.
-                            If U_mf_stoner=0 (default), reverts to Heisenberg-only boundary.
+          - J_eff: Gutzwiller-renormalised Heisenberg superexchange (ZSA CT + kinematic dd).
+                   Boundary coupling: h_bound = Z_BOUNDARY · J_eff · (M_ext/2) · O,
+                   consistent with BdG Weiss field h_afm = g_J·f_d·Z·J_CT·M/2.
+                   The former Stoner U_mf_stoner term is removed: it double-counted the
+                   correlation energy, since J_CT already derives from 2nd-order in t/U.
         """
         I4 = np.eye(4, dtype=complex)
-        H_cluster = np.kron(H_sp_A, I4) + np.kron(I4, H_sp_B)        
+        H_cluster = np.kron(H_sp_A, I4) + np.kron(I4, H_sp_B)
         H_cluster += J_eff * np.kron(self.multi_op, self.multi_op)
 
-        # Boundary coupling: Heisenberg + Stoner, matching BdG Weiss-field definition
-        H_bound = self.Z_BOUNDARY * (J_eff + U_mf_stoner / 2.0) * M_ext * self.multi_op
+        # Boundary coupling: pure Heisenberg, M_ext/2 = spin expectation per site
+        H_bound = self.Z_BOUNDARY * J_eff * (M_ext / 2.0) * self.multi_op
         H_cluster += np.kron(H_bound, I4)  # site A
         H_cluster += np.kron(I4, H_bound)  # site B
         return H_cluster
@@ -535,14 +539,6 @@ class RMFT_Solver:
         self._K_bare: float = params.K_lattice # immutable bare lattice spring constant (eV/Å²)
         self._chi0_norm_cache: Optional[tuple] = None   # (E, V, M, Q, mu, tx, ty, g_J)
         self._fs_cache_dict:   Optional[dict]  = None   # key → (fs_pts, vF); single unified FS cache
-
-    def J_eff_renorm(self, g_J: float, tx_bare: float, ty_bare: float, doping: float, j_renorm: float = 1.0) -> float:
-        """Gutzwiller + cluster-vertex-corrected superexchange.
-        j_renorm: ratio J_eff_cluster / J_eff_bare from compute_cluster_free_energy.
-        Pass 1.0 (default) when no cluster result is available yet (first iteration,
-        pre-SCF diagnostics, cloned solvers at T-scan start).
-        """
-        return j_renorm * self.p.effective_superexchange(g_J, tx_bare, ty_bare, doping)
 
     def _rebuild_orbital_operators(self) -> None:
         """
@@ -665,49 +661,49 @@ class RMFT_Solver:
         self._rebuild_orbital_operators()
         self._reset_transient_state()
 
-    def J_alpha_beta_Q(self, Q: float, lambda_hop: float) -> np.ndarray:
+    def _exchange_channels(self, Q: float) -> tuple:
         """
-        Q-dependent multipolar exchange matrix in the [Γ₆↑, Γ₆↓, Γ₇↑, Γ₇↓] basis.
+        Q-dependent multipolar exchange in the [Γ₆↑, Γ₆↓, Γ₇↑, Γ₇↓] basis.
 
-        Irrep decomposition (D₄h):
-            J(Q) = J_A1g(Q) · P_A1g  +  J_B1g(Q) · P_B1g
-            P_A1g = diag(1,1,η_J²,η_J²),   P_B1g = η_J·τ_x   (Γ₆–Γ₇ mixing).
+        D₄h decomposition:
+            J(Q) = J_A1g(Q)·P_A1g + J_B1g(Q)·P_B1g,
+            P_A1g = diag(1,1,η_J²,η_J²),  P_B1g = η_J·τ_x  (Γ₆–Γ₇ mixing).
 
-        Microscopic origin (hopping anisotropy):
-            t_x = t₀ e^{+Q/λ},  t_y = t₀ e^{-Q/λ},  with J ∝ t²  ⇒
-            J_A1g ∝ (J_CT/2) cosh(2Q/λ)   (even in Q),
-            J_B1g ∝ (J_CT/2) sinh(2Q/λ)   (odd, vanishes at Q=0).
+        Microscopic origin (anisotropic hopping t_x≠t_y, J ∝ t²):
+            t_x = t₀ e^{+Q/λ},  t_y = t₀ e^{-Q/λ}  ⇒
+            J_A1g ∝ J_CT·cosh(2Q/λ)  (even, longitudinal),
+            J_B1g ∝ J_CT·sinh(2Q/λ)  (odd, transverse; vanishes at Q=0).
 
-        MF normalization:
-            the 1/2 factor comes from counting each bond once in the two-sublattice Heisenberg mean-field equation.
+        At Q=0:
+            J_B1g = 0 (Γ₆–Γ₇ mixing forbidden), 
+            J_A1g = J_CT·diag(1,1,η_J²,η_J²), consistent with effective_superexchange.
 
         Physical consequence:
-            Q = 0  →  J_B1g = 0, Γ₆–Γ₇ mixing forbidden (AFM selection rule).
-            Q ≠ 0  →  B1g channel opens, enabling multipolar/JT response.
+            Q=0 → pure A1g (AFM selection rule);
+            Q≠0 → B1g channel opens (multipolar/JT response).
+
+        Returns:
+            J_A1g_diag   — Z·J_CT·scale_A1g·[1,1,η_J²,η_J²]
+            J_B1g_scalar — Z·J_CT·scale_B1g·η_J
+
+        η_J(Q): orbital-selective superexchange (J ∝ t²) yields Γ₆ (xz) vs Γ₇ (yz)
+        imbalance when t_x≠t_y (d_xy contributes to both).
         """
-        lam = max(lambda_hop, 1e-9)
+        lam   = max(self.p.lambda_hop, 1e-9)
+        e_p   = np.exp(+Q / lam)
+        e_m = np.exp(-Q / lam)
+        _jxz  = e_p ** 2           # (tx_q/t0)²
+        _jyz  = e_m ** 2           # (ty_q/t0)²
+        _jxy  = 0.5 * (_jxz + _jyz)
+        _J6   = self.p._w6_xz * _jxz + self.p._w6_yz * _jyz + self.p._w6_xy * _jxy
+        _J7   = self.p._w7_xz * _jxz + self.p._w7_yz * _jyz + self.p._w7_xy * _jxy
+        eta_J = float(np.sqrt(max(_J7 / max(_J6, 1e-9), 0.0)))  # orbital-weight ratio
+        s_A   = float(np.cosh(2.0 * Q / lam))  # even, longitudinal scale
+        s_B   = float(np.sinh(2.0 * Q / lam))  # odd,  transverse scale
 
-        scale_A1g = float(np.cosh(2.0 * Q / lam))
-        scale_B1g = float(np.sinh(2.0 * Q / lam))
-
-        # η_J(Q): orbital-character-weighted exchange ratio J_Γ₇/J_Γ₆.
-        # Superexchange J ∝ t² is orbital-selective: d_xz hops only along x,
-        # d_yz only along y, d_xy along both.  When tx≠ty the Γ₆ (xz-dominant)
-        # and Γ₇ (yz-dominant) sectors feel different effective exchanges.
-        tx_q = self.p.t0 * np.exp(+Q / lam)
-        ty_q = self.p.t0 * np.exp(-Q / lam)
-        t0   = max(self.p.t0, 1e-9)
-        # Normalised hopping weights (relative to isotropic t0²)
-        _jxz = (tx_q / t0) ** 2
-        _jyz = (ty_q / t0) ** 2
-        _jxy = 0.5 * (_jxz + _jyz)
-        _J6  = (self.p._w6_xz * _jxz + self.p._w6_yz * _jyz + self.p._w6_xy * _jxy)
-        _J7  = (self.p._w7_xz * _jxz + self.p._w7_yz * _jyz + self.p._w7_xy * _jxy)
-        eta_J = float(np.sqrt(max(_J7 / max(_J6, 1e-9), 0.0)))  # sqrt because J_A1g uses eta_J², at Q=0 (tx=ty=t0): eta_J = 1.0 exactly.
-
-        J_A1g = self.p.J_CT * scale_A1g * np.diag([1.0, 1.0, eta_J**2, eta_J**2])
-        J_B1g = self.p.J_CT * scale_B1g * eta_J * self.tau_x_mat
-        return J_A1g + J_B1g
+        J_A1g_diag = self.p.Z * self.p.J_CT * s_A * np.array([1.0, 1.0, eta_J**2, eta_J**2])
+        J_B1g_scalar  = self.p.Z * self.p.J_CT * s_B * eta_J
+        return J_A1g_diag, J_B1g_scalar
     
     def compute_JT_rigidity_from_exchange(self, M: float, Q: float, mu: float, g_J: float, target_doping: float, g_t_loc: float) -> Dict:
         """
@@ -763,6 +759,12 @@ class RMFT_Solver:
             f_kn = self.fermi_function(ev)
             ec2  = np.abs(ec)**2
             return np.einsum('k,kn,ai,kin->a', self.k_weights, f_kn, W, ec2, optimize=True)
+        
+        def _J_alpha_beta_Q(Qv):
+            # Full 4×4 exchange matrix for the rigidity ∂²F_ex/∂Q² derivative.
+            # J_B1g·τ_x contributes through the O_exp_Q @ J @ O_exp_Q contraction only when ⟨τ_x⟩≠0.
+            J_A1g_diag_v, J_B1g_scalar_v = self._exchange_channels(Qv)
+            return np.diag(J_A1g_diag_v) + J_B1g_scalar_v * self.tau_x_mat
 
         O_exp_Q = _calc_O_exp(ev_0, ec_0)
         O_p     = _calc_O_exp(ev_p, ec_p)
@@ -771,16 +773,16 @@ class RMFT_Solver:
         dO_dQ   = (O_p - O_m) / (2.0 * eps)
         d2O_dQ2 = (O_p - 2.0 * O_exp_Q + O_m) / (eps ** 2)
 
-        J_Q   = self.J_alpha_beta_Q(Q, self.p.lambda_hop)
-        J_p   = self.J_alpha_beta_Q(Q + eps, self.p.lambda_hop)
-        J_m   = self.J_alpha_beta_Q(Q - eps, self.p.lambda_hop)
+        J_Q   = _J_alpha_beta_Q(Q)
+        J_p   = _J_alpha_beta_Q(Q + eps)
+        J_m   = _J_alpha_beta_Q(Q - eps)
 
         dJ_dQ   = (J_p - J_m) / (2.0 * eps)
         d2J_dQ2 = (J_p - 2.0 * J_Q + J_m) / (eps ** 2)
 
         # Full ∂²F_ex/∂Q²
         term_J2    = float(O_exp_Q @ d2J_dQ2 @ O_exp_Q)           # O·(∂²J/∂Q²)·O
-        term_dO2   = 4.0 * float(dO_dQ @ J_Q @ dO_dQ)             # 4·(∂O/∂Q)·J·(∂O/∂Q)
+        term_dO2   = 2.0 * float(dO_dQ @ J_Q @ dO_dQ)             # 2·(∂O/∂Q)·J·(∂O/∂Q)
         term_O2    = 2.0 * float(O_exp_Q @ J_Q @ d2O_dQ2)         # 2·O·J·(∂²O/∂Q²)
         term_mix   = 4.0 * float(O_exp_Q @ dJ_dQ @ dO_dQ)         # 4·O·(∂J/∂Q)·(∂O/∂Q)
         d2F_ex_dQ2 = term_J2 + term_dO2 + term_O2 + term_mix
@@ -788,7 +790,7 @@ class RMFT_Solver:
         K_eff = self.p.K_lattice + d2F_ex_dQ2
 
         # Commutator diagnostic: [τ_x, H_AFM] at Q=0 — B1g blocking strength
-        h_afm_diag = self.J_alpha_beta_Q(0.0, self.p.lambda_hop) @ O_exp_Q
+        h_afm_diag = _J_alpha_beta_Q(0.0) @ O_exp_Q
         H_afm_mat  = np.diag(h_afm_diag)
         tau_x_4    = self.tau_x_mat
         comm       = tau_x_4 @ H_afm_mat - H_afm_mat @ tau_x_4
@@ -817,12 +819,6 @@ class RMFT_Solver:
         The gap is applied as a pure d-wave seed (Delta_d = delta_test, Delta_s = 0)
         so that the nodal structure is respected.  The Moriya damping is computed at
         """
-        # J_eff for Moriya damping: use J_eff_renorm
-        tx_bare_cs, ty_bare_cs = self.p.effective_hopping_anisotropic(Q)
-        J_eff = self.J_eff_renorm(g_J, tx_bare_cs, ty_bare_cs, target_doping)
-
-        sz_diag = self.sz_bdg16   # (16,) staggered Sz in 2-sublattice Nambu basis
-
         vbdg = self._get_vbdg()
 
         # Clone the output buffer to avoid mutating in-flight SCF cache
@@ -850,6 +846,7 @@ class RMFT_Solver:
         f_k = self.fermi_function(ev)   # (N, 16)
 
         # χ_SS Lehmann sum
+        sz_diag = self.sz_bdg16   # (16,) staggered Sz in 2-sublattice Nambu basis
         SzV  = sz_diag[None, :, None] * ec                          # (N,16,16)
         Mmat = np.einsum('kin,kim->knm', ec.conj(), SzV)            # (N,16,16)
         M2   = np.abs(Mmat) ** 2
@@ -868,6 +865,10 @@ class RMFT_Solver:
 
         ratio     = self.k_weights_even[:, None, None] * M2 * df_mask * dE.real / denom
         chi_ss    = float(ratio.sum())
+
+        # J_eff for Moriya damping: use J_eff_renorm
+        tx_bare, ty_bare = self.p.effective_hopping_anisotropic(Q)
+        J_eff = self.p.effective_superexchange(g_J, tx_bare, ty_bare, target_doping)
 
         _Gamma_M      = self.p.moriya_gamma(target_doping, t_eff, J_eff)
         _chi_ss_pos   = max(chi_ss, 0.0)
@@ -1110,7 +1111,7 @@ class RMFT_Solver:
                         'cnm,can,cam,cbm,cbn->ab',
                         kernel[k0:k1], Vk_a[k0:k1].conj(),
                         VkQ_a[k0:k1], VkQ_b[k0:k1].conj(),
-                        Vk_b[k0:k1], optimize='optimal')
+                        Vk_b[k0:k1], optimize='greedy')
             chi *= 0.5
             return chi
 
@@ -1362,7 +1363,7 @@ class RMFT_Solver:
             'V_rpa_mean': V_rpa_mean
         }
         
-    def _compute_orbital_coherence_from_pairs(self, M: float, Q: float, Delta_s: complex, Delta_d: complex, target_doping: float, mu: float, tx: float, ty: float, g_J: float) -> float:
+    def _compute_orbital_coherence_from_pairs(self, M: float, Q: float, Delta_s: complex, Delta_d: complex, target_doping: float, mu: float, tx: float, ty: float, g_J: float, _bdg_cache: tuple = None) -> float:
         """
         Anomalous SC-orbital coherence ⟨τ_x⟩_anom from off-diagonal BdG amplitudes (u·v). This probes the same Γ₆↔Γ₇ off-diagonal coherence driven by B1g_op.
 
@@ -1373,10 +1374,16 @@ class RMFT_Solver:
             Δ = 0  →  ⟨τ_x⟩_anom = 0  (selection rule exact in D₄h)
             Δ ≠ 0  →  ⟨τ_x⟩_anom ≠ 0, SC condensate unlocks B1g JT channel (only Q≠0)
 
-        The lattice couples to the total ⟨τ_x⟩; this quantity isolates the pure SC-induced contribution and verifies that Q is condensate-driven.
+        _bdg_cache : (ev, ec) from the current SCF iteration — reuse to avoid a
+            redundant eigh call AND to prevent the out= buffer from corrupting the
+            live _scf_bdg_cache tuple.
         """
         vbdg = self._get_vbdg()
-        ev_all, ec_all = np.linalg.eigh(vbdg._build_H_stack(vbdg._kpts, M, Q, Delta_s, Delta_d, target_doping, mu, tx, ty, g_J, out=vbdg._H_stack))
+        if _bdg_cache is not None:
+            ev_all, ec_all = _bdg_cache
+        else:
+            ev_all, ec_all = np.linalg.eigh(
+                vbdg._build_H_stack(vbdg._kpts, M, Q, Delta_s, Delta_d, target_doping, mu, tx, ty, g_J))
         f_n_all  = self.fermi_function(ev_all)
         omf_all  = 1.0 - 2.0 * f_n_all
         
@@ -1400,7 +1407,7 @@ class RMFT_Solver:
         )
         return float(tau_x_anom)
 
-    def build_local_hamiltonian_for_bdg(self, sign_M: float, M: float, Q: float, mu: float, g_J: float, target_doping: float, tx: float, ty: float, O_expectation: np.ndarray = None) -> np.ndarray:
+    def build_local_hamiltonian_for_bdg(self, sign_M: float, M: float, Q: float, mu: float, g_J: float, target_doping: float, tx: float, ty: float, tau_x_anom_mf: float = 0.0) -> np.ndarray:
         """
         Local 4×4 BdG Hamiltonian for one sublattice, basis [6↑, 6↓, 7↑, 7↓].
         sign_M = ±1 for sublattices A/B (staggered AFM).
@@ -1408,49 +1415,55 @@ class RMFT_Solver:
         Terms:
           1. Chemical potential −μ
           2. Crystal field splitting Δ_CF on Γ₇
-          3. AFM Weiss field:
-               h_α = g_J·(1−δ)·M +  Σ_β J_{αβ} · sz_β]
-        where:
-          (1−δ)        : RMFT spin-site fraction — fraction of sites with an S=1/2 spin (standard RMFT site-dilution)
-                         h_afm ∝ g_J·(1−δ)·J·M is maximal at half-filling (Mott limit), and decreases with doping. On the contrary J_eff uses f_J = max(δ,δ₀)/(max(δ,δ₀)+δ₀) ≥ 0.5 (finite floor at δ→0).
-          J_{αβ}(Q)    = J_A1g + J_B1g  superexchange tensor from J_alpha_beta_Q, which contains both kinematic Q-dependent ZSA- and dd-exchange
+          3. Longitudinal (diagonal) AFM Weiss field from J_A1g:
+               h_z[α] = sign_M · J_A1g[α,α] · g_J·(1−δ)·M·sz[α]
+             J_A1g = J_CT · cosh(2Q/λ) · diag(1, 1, η_J², η_J²)
+             This is purely diagonal (spin-preserving). It shifts the orbital energies.
+          4. Transverse (off-diagonal) anomalous Weiss field from J_B1g:
+               H_B1g = −sign_M · J_B1g_scalar · ⟨τ_x⟩_anom · τ_x_mat
+             J_B1g_scalar = J_CT · sinh(2Q/λ) · η_J
+             tau_x_mat is off-diagonal in the 4×4 basis: couples 6↑↔7↑ and 6↓↔7↓.
+             This term is ZERO in the normal state (Q=0 → sinh=0; or ⟨τ_x⟩_anom=0).
+             It is activated only when BOTH Q≠0 AND the SC condensate generates
+             anomalous orbital coherence ⟨τ_x⟩_anom ≠ 0.
+             Placing it off-diagonal is physically correct: J_B1g mixes Γ₆ and Γ₇,
+             it does NOT shift their energies diagonally.
+          5. JT distortion: H_JT = g_JT · Q · B1g_op
 
-        O_expectation: optional 4-element array ⟨O_β⟩ for each orbital.
-            If None: uses the MF approximation ⟨O_β⟩ = g_J·(1−δ)·M · sz_β.
+        tau_x_anom_mf: Gutzwiller-renormalised anomalous orbital coherence
+            ⟨τ_x⟩_renorm = g_Delta_s · ⟨τ_x⟩_BdG, passed from the SCF loop.
+            Default 0.0 (normal state, first iterations, chi0 calls).
 
-        SC–JT chain: Δ≠0 → anomalous ⟨B1g_op⟩≠0 → Q≠0 → H_JT≠0
-        In D₄h B1g_op is a singlet operator (spin-flip off-diagonal), so ⟨B1g_op⟩=0 in any normal state; the condensate is required to unlock it.
-        No explicit anomalous Σ ∝ Δ term (would double-count BdG feedback).
+        SC–JT chain: Δ≠0 → ⟨τ_x⟩_anom≠0 → H_B1g≠0 → mixes Γ₆/Γ₇ → modifies
+        spectrum → feeds back into gap equation self-consistently.
         """
         H = np.zeros((4, 4), dtype=complex)
 
-        # chemical potential
+        # 1. Chemical potential
         np.fill_diagonal(H, -mu)
 
-        # crystal field splitting Δ_CF on Γ₇
+        # 2. Crystal field splitting Δ_CF on Γ₇
         H[2, 2] += self.p.Delta_CF  # 7↑
         H[3, 3] += self.p.Delta_CF  # 7↓
 
-        # mean-field AFM Weiss field
+        # 3. AFM Weiss field: longitudinal (J_A1g) + transverse (J_B1g)
+        J_A1g_diag, J_B1g_scalar = self._exchange_channels(Q)
         abs_delta = max(abs(target_doping), 1e-6)
-        if O_expectation is None:
-            O_exp = g_J * (1.0 - abs_delta) * M * self.sz_op
-        else:
-            O_exp = np.asarray(O_expectation, dtype=float)
+        O_exp_z   = g_J * (1.0 - abs_delta) * M * self.sz_op / 2.0  # /2 factor due to the Mean-Field Weiss field related to one longitudinal spin
+        h_z = sign_M * (J_A1g_diag * O_exp_z)
 
-        h_J_vec = self.J_alpha_beta_Q(Q, self.p.lambda_hop) @ O_exp
-        # total Weiss field per orbital, with staggered sign
-        h_vec = sign_M * h_J_vec
-        
-        # B₁g multipolar selection rule
-        H[0, 0] -= h_vec[0]   # 6↑
-        H[1, 1] -= h_vec[1]   # 6↓
-        H[2, 2] -= h_vec[2]   # 7↑
-        H[3, 3] -= h_vec[3]   # 7↓
+        H[0, 0] -= h_z[0]   # 6↑
+        H[1, 1] -= h_z[1]   # 6↓
+        H[2, 2] -= h_z[2]   # 7↑
+        H[3, 3] -= h_z[3]   # 7↓
 
-        # JT distortion: H_JT = g_JT · Q · B1g_op
-        _hjt = self.p.g_JT * Q
-        H += _hjt * self.B1g_op
+        # Transverse term: active only when Q≠0 AND condensate has ⟨τ_x⟩_anom≠0.
+        # H_Weiss = −J·⟨O⟩; J_B1g is off-diagonal (6↑↔7↑, 6↓↔7↓), never diagonal.
+        if abs(tau_x_anom_mf) > 1e-12:
+            H -= sign_M * (J_B1g_scalar * tau_x_anom_mf) * self.tau_x_mat
+
+        # 4. JT distortion: H_JT = g_JT · Q · B1g_op
+        H += (self.p.g_JT * Q) * self.B1g_op
         return H
 
     def build_single_particle_hamiltonian(self, Q: float, mu: float) -> np.ndarray:
@@ -1628,11 +1641,8 @@ class RMFT_Solver:
         # Bare exchange and Stoner scaling
         J_eff_bare = self.p.effective_superexchange(g_J, tx_bare, ty_bare, doping)
 
-        abs_d = max(abs(doping), 1e-6)
-        f_d   = 1.0 - abs_d
-        U_mf_stoner = g_J * f_d * self.p.U_mf
-
-        H_cluster = self.cluster_mf.build_cluster_hamiltonian(H_sp_A, H_sp_B, J_eff_bare, M, U_mf_stoner)
+        # Adding a separate Stoner U·M/2 term would double-count the correlation energy: J_CT itself derives from 2nd-order perturbation in t_pd/U
+        H_cluster = self.cluster_mf.build_cluster_hamiltonian(H_sp_A, H_sp_B, J_eff_bare, M)
         evals, evecs = np.linalg.eigh(H_cluster)
 
         # Free energy (stable log-sum-exp)
@@ -1755,7 +1765,7 @@ class RMFT_Solver:
         # Warm-start estimates (cheap approximation for seeding)
         chi0_est = N0 / (1.0 + (self.p.U_mf / max(np.pi * t_eff, 1e-9))**2)
 
-        J_eff_scalar = g_J * self.p.J_CT
+        J_eff_scalar = self.p.effective_superexchange(g_J, self.p.t0, self.p.t0, target_doping)
         _Gamma_M     = self.p.moriya_gamma(target_doping, t_eff, J_eff_scalar)
         chi0_moriya  = chi0_est / (1.0 + _Gamma_M * max(chi0_est, 0.0))
 
@@ -1843,7 +1853,7 @@ class RMFT_Solver:
         1. Build 16×16 BdG Hamiltonian H(k; M, Q, Δ_s, Δ_d, μ) on the uniform k-grid.
         2. Diagonalise → (E_k, ψ_k); compute observables: M_BdG, ⟨τ_x⟩, Pair_s, Pair_d.
         3. If SC+JT active (Δ>0, Q>0): inject anomalous orbital coherence ⟨τ_x⟩_anom
-           into the Weiss field O_expectation, rebuild BdG cache.
+           into the off-diagonal Weiss field (J_B1g channel) as tau_x_anom_mf, rebuild BdG cache.
         4. On iter 0 and when ≥5 iters passed AND |ΔM| > 0.02:
            update K_eff = K_lattice + ∂²F_ex/∂Q² (exchange rigidity correction).
         5. Solve gap equations for (Δ_s_out, Δ_d_out) via RPA vertex fixed-point.
@@ -1926,7 +1936,7 @@ class RMFT_Solver:
         n_kspace_new  = 1.0 - target_doping
         max_diff      = float('inf')
         F_bdg         = 0.0
-        F_cluster     = {'F_per_site': 0.0, 'J_eff': self.p.J_CT, 'j_renorm': 1.0}
+        F_cluster     = {'F_per_site': 0.0, 'J_eff': self.p.Z * self.p.J_CT, 'j_renorm': 1.0}
         _j_renorm_cur = 1.0   # cluster vertex correction for current iteration; starts bare
         _det_q0       = 1.0
         _det_afm      = 1.0
@@ -1934,6 +1944,7 @@ class RMFT_Solver:
         _near_afm_qcp = False
         _tol_use      = self.p.tol
         selection_ratio = 0.0
+        _MIN_ITER = 4
 
         for iteration in range(_MAX_ITER):
             _iter_t0 = _time.time()
@@ -1951,40 +1962,30 @@ class RMFT_Solver:
             obs = self._get_vbdg().compute_observables_vectorized(
                 M, Q, Delta_s, Delta_d, target_doping, mu, tx, ty, g_J,
                 _bdg_cache=(_bdg_ev_sc, _bdg_ec_sc))
-            tau_x     = obs['tau_x']    # off-diagonal Γ₆↔Γ₇ mixing — used for O_expectation Weiss-field feedback only
+            tau_x     = obs['tau_x']    # off-diagonal Γ₆↔Γ₇ mixing — used for tau_x_anom_mf Weiss-field feedback
             B1g_exp   = obs['B1g_exp']  # full ⟨B̂₁g⟩ — Hellmann-Feynman lattice force
             M_bdg     = obs['M_stag']        # BdG response: lattice magnetization
 
-            # Feed back the SC-induced orbital coherence ⟨τ_x⟩ into O_expectation (the τ_x→Weiss feedback is most important near the Q=0→Q≠0 bifurcation where Q is still small)
-            # When Δ≠0 and Q≠0, the BdG eigenvectors carry anomalous Γ₆↔Γ₇ mixing absent in the diagonal approximation O_exp = g_J·f_d·M·sz_op.
-            # tau_x_anom = Σ_k Re(u_k·v_k*) anomalous orbital weight (Eq. 6↔⟦7⟩ off-diag pairing).
-            # It enters build_local_hamiltonian via J_B1g @ O_exp, i.e. it corrects the Weiss field to reflect that the SC condensate has made the B1g channel accessible.
-            #     O_expectation  -> single-particle Weiss field in H_A / H_B
-            #     gap_eq vertex  -> two-particle RPA pairing kernel V(q) from chi0_normal
+            # Feed back the SC-induced anomalous orbital coherence ⟨τ_x⟩ into the
+            # off-diagonal (J_B1g) Weiss field via tau_x_anom_mf.
+            # When Δ≠0 and Q≠0, the BdG eigenvectors carry anomalous Γ₆↔Γ₇ mixing
+            # that drives a transverse mean-field correction to H_A / H_B.
+            # This correction is ZERO in the normal state by symmetry (Q=0 → J_B1g=0;
+            # or Δ=0 → ⟨τ_x⟩_anom=0). It is placed in the off-diagonal of H (τ_x_mat: 6↑↔7↑, 6↓↔7↓)
             Delta_eff_now = abs(Delta_s) + abs(Delta_d)
-            if Delta_eff_now > 1e-4:
-                tau_x_anom   = self._compute_orbital_coherence_from_pairs(
+            if Delta_eff_now > 1e-5 and abs(Q) > 1e-8:
+                tau_x_anom = self._compute_orbital_coherence_from_pairs(
                     M, Q, Delta_s, Delta_d, target_doping, mu, tx, ty, g_J)
-                abs_d_oe     = max(abs(target_doping), 1e-6)
-                f_d_oe       = 1.0 - abs_d_oe           # RMFT: (1-δ) spin-site fraction
-                O_exp_diag   = g_J * f_d_oe * M * self.sz_op   # (4,) diagonal part
-
-                # tau_x_anom from raw BdG amplitudes (u·v*) = uncorrelated mean-field coherence.
-                # In RMFT, renormalize the anomalous expectation by the Gutzwiller pairing factor: g_Delta_s (= g_t = 2δ/(1+δ)).
-                # Without it: SC feedback ~1/g_Delta_s too large (≈3× at δ=0.2), inflating B1g.
+                # Gutzwiller renormalisation: raw BdG ⟨τ_x⟩ overestimates by ~1/g_Delta_s
                 tau_x_renorm = g_Delta_s * tau_x_anom
-
-                # off-diagonal τ_x couples Γ₆↑↔Γ₇↑ (index 0↔2) and Γ₆↓↔Γ₇↓ (index 1↔3)
-                tau_x_component = tau_x_renorm * np.array([1.0, 1.0, -1.0, -1.0])
-                O_expectation_scf = O_exp_diag + tau_x_component
             else:
-                O_expectation_scf = None   # use fast diagonal approximation
+                tau_x_renorm = 0.0
 
-            # Rebuild SC-state BdG cache with updated O_expectation if SC+JT active. This ensures the K-space Hamiltonian used for gap-eq and K_eff update
-            if O_expectation_scf is not None:
+            # Rebuild SC-state BdG cache with the off-diagonal anomalous Weiss field.
+            if abs(tau_x_renorm) > 1e-12:
                 _vbdg_scf2 = self._get_vbdg()
                 _bdg_ev_sc, _bdg_ec_sc = np.linalg.eigh(
-                    _vbdg_scf2._build_H_stack(_vbdg_scf2._kpts, M, Q, Delta_s, Delta_d, target_doping, mu, tx, ty, g_J, O_expectation_scf, out = _vbdg_scf2._H_stack)
+                    _vbdg_scf2._build_H_stack(_vbdg_scf2._kpts, M, Q, Delta_s, Delta_d, target_doping, mu, tx, ty, g_J, tau_x_anom_mf=tau_x_renorm, out=_vbdg_scf2._H_stack)
                 )
                 self._scf_bdg_cache = (_bdg_ev_sc, _bdg_ec_sc)
 
@@ -2010,7 +2011,7 @@ class RMFT_Solver:
                 _bdg_cache=(_bdg_ev_sc, _bdg_ec_sc), _vertex_cache=_vertex_cache)
 
 
-            dF_dM_0, d2F_dM2 = self.compute_dF_dM_and_d2F(M, Q, Delta_s, Delta_d, target_doping, mu, tx, ty, g_J)
+            dF_dM_0, d2F_dM2 = self.compute_dF_dM_and_d2F(M, Q, Delta_s, Delta_d, target_doping, mu, tx, ty, g_J, tau_x_anom_mf=tau_x_renorm)
             self._scf_bdg_cache = None   # cache consumed; clear to prevent stale reuse
 
             # Adaptive LM floor: large μ_LM can overdamp M even when Δ grows, freezing SC–AFM coupling.
@@ -2308,7 +2309,14 @@ class RMFT_Solver:
             _Ds_post  = abs(Delta_s)    - abs(_Ds_pre_kick)
             _Dd_post  = abs(Delta_d)    - abs(_Dd_pre_kick)
             _kick_fired = (abs(_M_post) + abs(_Q_post) + abs(_Ds_post) + abs(_Dd_post)) > 1e-10
-            if not _kick_fired and max_diff < _tol_use and abs(n_kspace_new - (1 - target_doping)) < _tol_use * 10:
+
+            _past_qcp = (_det_afm < 0.0)
+            _too_early = (iteration < _MIN_ITER)
+            if (not _kick_fired
+                    and not _too_early
+                    and not _past_qcp
+                    and max_diff < _tol_use
+                    and abs(n_kspace_new - (1 - target_doping)) < _tol_use * 10):
                 converged = True
                 break
 
@@ -2319,7 +2327,7 @@ class RMFT_Solver:
 
         # Post-loop diagnostic: λ_max and Rayleigh JT projection.
         _tx_mixed_bare, _ty_mixed_bare = self.p.effective_hopping_anisotropic(Q)
-        _J_eff_lin = self.J_eff_renorm(g_J, _tx_mixed_bare, _ty_mixed_bare, target_doping, j_renorm=F_cluster['j_renorm'])
+        _J_eff_lin = self.p.effective_superexchange(g_J, _tx_mixed_bare, _ty_mixed_bare, target_doping) * F_cluster['j_renorm']
         _lin: Dict = self.solve_linearized_gap_equation(M, Q, Delta_s, Delta_d, target_doping, mu, tx_mixed, ty_mixed, g_J, _K_eff_scf, _J_eff_lin, actual_doping=float(1.0 - n_kspace_new))
 
         if converged:
@@ -2624,26 +2632,34 @@ class RMFT_Solver:
             return x_simple
         return x_new
 
-    def compute_dF_dM_and_d2F(self, M: float, Q: float, Delta_s: complex, Delta_d: complex, target_doping: float, mu: float, tx: float, ty: float, g_J: float) -> Tuple[float, float]:
+    def compute_dF_dM_and_d2F(self, M: float, Q: float, Delta_s: complex, Delta_d: complex, target_doping: float, mu: float, tx: float, ty: float, g_J: float, tau_x_anom_mf: float = 0.0) -> Tuple[float, float]:
         abs_d = max(abs(target_doping), 1e-6)
         f_d   = 1.0 - abs_d              # RMFT: (1-δ) spin-site fraction
         
-        # Generating the same Weiss space for M=1.0 units as in BdG.
-        O_exp_unit = g_J * f_d * self.sz_op
-        h_J_unit   = self.J_alpha_beta_Q(Q, self.p.lambda_hop) @ self.sz_op
+        # ∂H/∂M per orbital in the 16-component Nambu basis.
+        # Only J_A1g (diagonal) contributes: J_B1g (off-diagonal, τ_x_mat) has zero
+        # diagonal elements so (J_B1g_scalar * tau_x_mat) @ O_exp_unit is off-diagonal
+        # and does not enter the diagonal |ec|²-weighted gradient / Kubo sum here.
+        # However, the eigenvectors ec must come from the FULL Hamiltonian including
+        # the J_B1g off-diagonal Weiss field (tau_x_anom_mf), so that the Kubo-formula
+        # term2 correctly captures inter-band matrix elements through the modified bands.
+        O_exp_unit = g_J * f_d * self.sz_op / 2.0
+        J_A1g_diag, _ = self._exchange_channels(Q)
+        h_J_unit = J_A1g_diag * O_exp_unit   # element-wise: diagonal ∂H/∂M
         
         dH_diag = np.array([
-            -h_J_unit[0], -h_J_unit[1], -h_J_unit[2], -h_J_unit[3],   # particle A
-            +h_J_unit[0], +h_J_unit[1], +h_J_unit[2], +h_J_unit[3],   # particle B
-            +h_J_unit[0], +h_J_unit[1], +h_J_unit[2], +h_J_unit[3],   # hole A
-            -h_J_unit[0], -h_J_unit[1], -h_J_unit[2], -h_J_unit[3],   # hole B
+            -h_J_unit[0], -h_J_unit[1], -h_J_unit[2], -h_J_unit[3],   # particle A  (sign_M=+1)
+            +h_J_unit[0], +h_J_unit[1], +h_J_unit[2], +h_J_unit[3],   # particle B  (sign_M=−1)
+            +h_J_unit[0], +h_J_unit[1], +h_J_unit[2], +h_J_unit[3],   # hole A      (PH of A)
+            -h_J_unit[0], -h_J_unit[1], -h_J_unit[2], -h_J_unit[3],   # hole B      (PH of B)
         ])
 
         vbdg = self._get_vbdg()
         if hasattr(self, '_scf_bdg_cache') and self._scf_bdg_cache is not None:
             ev, ec = self._scf_bdg_cache
         else:
-            ev, ec = np.linalg.eigh(vbdg._build_H_stack(vbdg._kpts, M, Q, Delta_s, Delta_d, target_doping, mu, tx, ty, g_J, out=vbdg._H_stack))
+            ev, ec = np.linalg.eigh(vbdg._build_H_stack(
+                vbdg._kpts, M, Q, Delta_s, Delta_d, target_doping, mu, tx, ty, g_J, tau_x_anom_mf=tau_x_anom_mf, out=vbdg._H_stack))
         f_all = self.fermi_function(ev)
         exp_nn = np.einsum('i,kin->kn', dH_diag, np.abs(ec)**2)
 
@@ -3196,7 +3212,7 @@ class RMFT_Solver:
                 actual_doping = float(1.0 - res['density'])
 
                 _tx_b_lT, _ty_b_lT = s_T.p.effective_hopping_anisotropic(Q)
-                _J_eff_lT = s_T.J_eff_renorm(g_J, _tx_b_lT, _ty_b_lT, doping, j_renorm=res.get('j_renorm', 1.0))
+                _J_eff_lT = self.p.effective_superexchange(g_J, _tx_b_lT, _ty_b_lT, target_doping) * res['j_renorm']
                 lin = s_T.solve_linearized_gap_equation(M, Q, complex(res['Delta_s']), complex(res['Delta_d']), doping, mu, tx, ty, g_J, res['K_eff_scf'], _J_eff_lT, actual_doping=actual_doping)
                 lam_arr[i] = float(lin['lambda_max'])
                 sym_list.append(lin['gap_symmetry'])
@@ -3296,7 +3312,7 @@ class RMFT_Solver:
 
         abs_d = max(abs(target_doping), 1e-6)
         f_d   = 1.0 - abs_d   # RMFT: (1-δ) spin-site fraction
-        h_afm = g_J * f_d * (self.p.U_mf / 2.0 + self.p.Z * 2.0 * t_eff**2 / max(self.p.U, 1e-6)) * M / 2.0
+        h_afm = g_J * f_d * self.p.Z * self.p.J_CT * M / 2.0
         mu_n  = -2.0 * t_eff * (1.0 - 2.0 * abs_d)
 
         kx = self.k_points[:, 0]
@@ -3405,7 +3421,7 @@ class RMFT_Solver:
         Tc_est  = float(1.13 * t_eff * np.exp(-1.0 / lambda_eff)) if lambda_eff > 1e-3 else 0.0
 
 
-        J_eff           = self.J_eff_renorm(g_J, self.p.t0, self.p.t0, target_doping)
+        J_eff           = self.p.effective_superexchange(g_J, self.p.t0, self.p.t0, target_doping)
         _Gamma_M        = self.p.moriya_gamma(target_doping, g_t * self.p.t0, J_eff)
         _chi_DD_s_pos   = max(chi_DD_s, 0.0)
         chi_DD_s_moriya = _chi_DD_s_pos / (1.0 + _Gamma_M * _chi_DD_s_pos)  # Moriya-damped chi_DD_s for H2 / jchi_gate
@@ -3424,7 +3440,7 @@ class RMFT_Solver:
                     tx_eff_v   = g_t * tx_b
                     ty_eff_v   = g_t * ty_b
                     t_eff_v    = float(np.sqrt(0.5 * (tx_eff_v**2 + ty_eff_v**2)))
-                    J_eff_v    = self.J_eff_renorm(g_J, tx_b, ty_b, target_doping)
+                    J_eff_v    = self.p.effective_superexchange(g_J, tx_b, ty_b, target_doping)
                     mu_n_v     = -2.0 * t_eff_v * (1.0 - 2.0 * abs_d)   # charge-neutral μ at Qv
                     lin = self.solve_linearized_gap_equation(M, Qv, 0.0+0j, 0.0+0j, target_doping, mu_n_v, tx_eff_v, ty_eff_v, g_J, K_eff_here, J_eff_v, target_doping)
                     return lin['lambda_max']
@@ -3596,7 +3612,7 @@ class VectorizedBdG:
         self._H_stack    = np.zeros((self._N_k,    16, 16), dtype=complex)  # SCF grid buffer
         self._H_stack_ev = np.zeros((self._N_k_ev, 16, 16), dtype=complex)  # chi0 grid buffer
 
-    def _build_H_stack(self, kpts: np.ndarray, M: float, Q: float, Delta_s: complex, Delta_d: complex, target_doping: float, mu: float, tx: float, ty: float, g_J: float, O_expectation: Optional[np.ndarray] = None, out: Optional[np.ndarray] = None) -> np.ndarray:
+    def _build_H_stack(self, kpts: np.ndarray, M: float, Q: float, Delta_s: complex, Delta_d: complex, target_doping: float, mu: float, tx: float, ty: float, g_J: float, tau_x_anom_mf: float = 0.0, out: Optional[np.ndarray] = None) -> np.ndarray:
         """
         Build the (N, 16, 16) BdG Hamiltonian stack for an arbitrary kpts array.
 
@@ -3617,32 +3633,25 @@ class VectorizedBdG:
 
         Parameters
         ----------
-        kpts : (N, 2) array of k-points.  May be self._kpts (full grid) or any
-               arbitrary sub-grid (e.g. k+Q shifted for chi0 routines).
-        out  : optional pre-allocated (N, 16, 16) complex buffer.  If provided
-               the result is written in-place (no heap allocation) and the same
-               array is returned.  Pass self._H_stack here for the hot SCF path
-               to avoid per-iteration GC pressure.
+        kpts          : (N, 2) array of k-points.
+        tau_x_anom_mf : Gutzwiller-renormalised anomalous orbital coherence
+                        ⟨τ_x⟩_renorm passed from the SCF loop. Default 0.0
+                        (normal state, chi0 calls, first iterations).
+        out           : optional pre-allocated (N, 16, 16) complex buffer.
         """
         N = len(kpts)
-        # Allocate / reuse output
         if out is None:
             H = np.zeros((N, 16, 16), dtype=complex)
         else:
             H = out
             H[:] = 0.0 + 0.0j
 
-
         # ---- Local Hamiltonians (A/B sublattice) ----
-        local_kwargs = dict(tx=tx, ty=ty)
-        if O_expectation is not None:
-            local_kwargs["O_expectation"] = O_expectation
-
         H_A = self.solver.build_local_hamiltonian_for_bdg(
-            +1.0, M, Q, mu, g_J, target_doping, **local_kwargs
+            +1.0, M, Q, mu, g_J, target_doping, tx, ty, tau_x_anom_mf=tau_x_anom_mf,
         )
         H_B = self.solver.build_local_hamiltonian_for_bdg(
-            -1.0, M, Q, mu, g_J, target_doping, **local_kwargs
+            -1.0, M, Q, mu, g_J, target_doping, tx, ty, tau_x_anom_mf=tau_x_anom_mf,
         )
 
         # ---- On-site singlet pairing (Delta_s) ----
@@ -3765,7 +3774,7 @@ class VectorizedBdG:
                      + (np.abs(vB)**2 * solver.sz_op[None, :, None]) * fbar[:, None, :], axis=(1, 2))
 
         # ── Quadrupole τ_x = 2 Re(u₀*u₂ + u₁*u₃): off-diagonal Γ₆↔Γ₇ mixing (D₄h component of B1g_op) ──────────
-        # Kept for the anomalous-O_expectation Weiss-field diagnostic
+        # Normal-state diagnostic; also used as seed for _compute_orbital_coherence_from_pairs
         tau_u_A = 2.0 * np.real(uA[:, 0, :] * np.conj(uA[:, 2, :])
                                + uA[:, 1, :] * np.conj(uA[:, 3, :]))   # (N_k, 16)
         tau_v_A = 2.0 * np.real(vA[:, 0, :] * np.conj(vA[:, 2, :])
@@ -3870,7 +3879,7 @@ class VectorizedBdG:
 
         if _vertex_stale:
             tx_bare_v, ty_bare_v = solver.p.effective_hopping_anisotropic(Q)
-            J_eff = solver.J_eff_renorm(g_J, tx_bare_v, ty_bare_v, target_doping, j_renorm=_j_renorm)
+            J_eff = _j_renorm * solver.p.effective_superexchange(g_J, tx_bare_v, ty_bare_v, target_doping)
 
             # s-channel: single q=0 call
             q = np.zeros(2)
@@ -5115,7 +5124,7 @@ if __name__ == "__main__":
             initial_M     = _ref_M,
             initial_Q     = _ref_Q,
             initial_Delta = initial_Delta,
-            verbose       = False,
+            verbose       = True,
         )
         _ref_M = _ref_result['M']
         _ref_Q = _ref_result['Q']
