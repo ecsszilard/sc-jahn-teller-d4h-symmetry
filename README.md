@@ -30,7 +30,7 @@ In a standard picture, the Jahn–Teller (JT) effect *precedes* superconductivit
 - only in this paired subspace does **rank-2 multipolar order become accessible**, and
 - the B₁g JT distortion emerges as an **induced response** of the superconducting condensate — not as a primary instability.
 
-The selection rule is enforced by the B₁g phonon operator `B1g_op = U₄†(Lx²−Ly²)U₄` projected to the active Γ₆⊕Γ₇a subspace. In D₄h (Δ_inplane = 0) this operator is purely anti-diagonal (spin-flip): it couples (Γ₆↑)↔(Γ₇a↓) and (Γ₆↓)↔(Γ₇a↑), so `⟨B1g_op⟩ = 0` exactly in any normal state — the JT distortion is a symmetry singlet that requires Cooper pairs to unlock it. In D₂h (Δ_inplane ≠ 0) the operator gains spin-conserving and diagonal elements, partially activating the JT channel without SC; the SC-triggered excess is then isolated as `δχ_τ = χ_τ(Δ≠0) − χ_τ(Δ=0)`.
+The selection rule is enforced by the B₁g phonon operator `B1g_op = real(U₄†(Lx²−Ly²)U₄)` projected to the active Γ₆⊕Γ₇a subspace. In D₄h (Δ_inplane = 0) this operator is purely anti-diagonal (spin-flip): it couples (Γ₆↑)↔(Γ₇a↓) and (Γ₆↓)↔(Γ₇a↑), so `⟨B1g_op⟩ = 0` exactly in any normal state — the JT distortion is a symmetry singlet that requires Cooper pairs to unlock it. In D₂h (Δ_inplane ≠ 0) the operator gains spin-conserving and diagonal elements, partially activating the JT channel without SC; the SC-triggered excess is then isolated as `δχ_τ = χ_τ(Δ≠0) − χ_τ(Δ=0)`.
 
 SC-triggered JT activation is tracked by a **selection ratio**:
 
@@ -139,13 +139,13 @@ The two denominator terms represent the Mott channel (pd→dd, cost U) and the Z
 U_mf = Z · J_CT / 2
 ```
 
-stored without Gutzwiller renormalization; `g_J · (1−δ)` is applied at runtime in `build_local_hamiltonian_for_bdg`. The effective AFM splitting entering the BdG Hamiltonian is:
+stored without Gutzwiller renormalization; `g_J · (1−δ)` is applied at runtime in `build_local_hamiltonian_for_bdg`. The effective AFM Weiss field entering the BdG Hamiltonian is:
 
 ```
-h_AFM = g_J · (1−δ) · (U_mf/2 + Z·2t²/U) · M/2
+h_z[α] = sign_M · J_A1g[α,α] · g_J·(1−δ) · M · sz[α] / 2
 ```
 
-where `(1−δ)` is the RMFT spin-site fraction (maximal at half-filling, → 0 at large doping) and `Z·2t²/U` is the kinematic dd-exchange (second order in `t₀ = t_pd²/Δ_CT`). The ZRS coherence crossover scale `δ₀` is derived from the Zhang–Rice singlet spectral weight:
+where `J_A1g = J_CT · cosh(2Q/λ) · diag(1, 1, η_J², η_J²)` is the longitudinal (diagonal, spin-preserving) exchange tensor. The ZRS coherence crossover scale `δ₀` is derived from the Zhang–Rice singlet spectral weight:
 
 ```
 z_ZRS = t_pd² / (Δ_CT² + t_pd²),    δ₀ = z_ZRS / (1 − z_ZRS)
@@ -166,13 +166,14 @@ g_Delta_d = interpolates(g_t, g_J, w_norm)  # d-wave B₁g: weighted by Γ₇ ad
 
 `g_Delta_d` interpolates between `g_t` (Γ₇ decoupled) and `g_J` (full Γ₆–Γ₇ mixing) using `w_norm = p_7 / 0.5`, where `p_7` is the Γ₇ spectral weight in the Γ₆ doublet from the SOC+CF eigenvectors.
 
-The effective superexchange used in the cluster and pairing vertex is:
+The effective superexchange used in the cluster and pairing vertex is a single-bond quantity:
 
 ```
-J_eff = g_J · f_J(δ) · J_CT,    f_J(δ) = max(δ, δ₀) / (max(δ, δ₀) + δ₀)
+J_bond = g_J · f_J(δ) · (tx² + ty²) · (1/U + 1/(Δ_CT + U/2))
+f_J(δ) = max(δ, δ₀) / (max(δ, δ₀) + δ₀)
 ```
 
-`f_J` saturates at 0.5 as δ→0 so that `J_eff → 2·J_CT` at half-filling (Mott limit), rather than vanishing. This is distinct from the Weiss field scaling `(1−δ)`: the Weiss field is maximal at half-filling, while `f_J` prevents `J_eff` from collapsing to zero near the Mott insulator.
+The lattice-summed Weiss-field scale is `J_eff = Z · J_bond`, applied consistently at all call sites. `f_J` saturates at 0.5 as δ→0 so that `J_eff → 2·Z·J_CT` at half-filling (Mott limit), rather than vanishing. This is distinct from the Weiss field scaling `(1−δ)`: the Weiss field is maximal at half-filling, while `f_J` prevents `J_eff` from collapsing to zero near the Mott insulator.
 
 A Mott guard suppresses SC at `g_t < 0.10` (δ < 0.053): the Gutzwiller factor encodes the full doping-dependent Mott suppression, and no physical SC gap can exist without a coherent Fermi surface. A secondary guard at `ξ/a < 1.0` filters the BEC/artefact extreme limit.
 
@@ -359,11 +360,11 @@ Spin fluctuations are regularised by Moriya damping (doping-dependent) rather th
 Γ_M = α_M · J_eff · t_eff,    α_M = max(C · δ · (t_eff / J_eff), α_M_floor),    C = 0.35
 ```
 
-This ensures `Γ_M → 0` at half-filling (long-range AFM, no damping) and grows with doping as metallic screening broadens the QCP.
+This ensures `Γ_M → 0` at half-filling (long-range AFM, no damping) and grows with doping as metallic screening broadens the QCP. The floor `α_M_floor = _ALPHA_MORIYA = 0.15` prevents numerical runaway at very low doping and ensures `det(RPA)` never reaches `_RPA_DET_FLOOR` in the physically relevant near-QCP regime.
 
 **Static AFM susceptibility χ_DD_s** is computed at q=0 in the folded 2-sublattice BdG basis. The staggered magnetisation M and the sublattice sign-flip already encoded in `sz_bdg16` select the (π,π) channel automatically — no k+Q permutation is needed. The Lorentz broadening η is set to `max(0.01·t₀, _FD_MASK_DE)` (≈1% of bandwidth), providing consistent FS resolution between χ_DD_s and χ₀(q) tensor computations.
 
-**Separate QCP tracking:** the vertex cache now separately monitors the FM instability at q=0 (`det_q0`) and the AFM instability at q=(π,π) (`det_afm`). The SCF adaptive mixing and convergence tolerance respond to `det_afm`; the FM check guards against accidental ferromagnetic divergence. Both determinants are logged at convergence.
+**Separate QCP tracking:** the vertex cache separately monitors the FM instability at q=0 (`det_q0`) and the AFM instability at q=(π,π) (`det_afm`). The SCF adaptive mixing and convergence tolerance respond to `det_afm`; the FM check guards against accidental ferromagnetic divergence. Both determinants are logged at convergence.
 
 **∂λ_pair/∂Q > 0 is the key numerical criterion for the SC-triggered JT hypothesis.** A positive value confirms that an infinitesimal B₁g distortion increases the pairing strength through the spin-fluctuation channel. It is evaluated at Δ=0 with the converged SCF chemical potential.
 
@@ -472,11 +473,11 @@ Beyond BdG mean field, a 2-site (A–B) cluster is exactly diagonalized at each 
 
 ```
 H_cluster = H_sp(A) ⊗ I + I ⊗ H_sp(B)
-          + J_eff · O_A ⊗ O_B
-          + Z_boundary · (J_eff + U_mf_stoner/2) · M_ext · (O_A ⊗ I + I ⊗ O_B)
+          + J_bond · O_A ⊗ O_B
+          + Z_boundary · J_bond · M_ext · (O_A ⊗ I + I ⊗ O_B)
 ```
 
-where `O = multi_op` (pre-built in `ModelParams.__post_init__`). `ClusterMF` receives `multi_op` and `Z` as constructor arguments; the operator is not rebuilt per iteration. The boundary Weiss field scales as `g_J·(1−δ)`, consistent with the BdG Weiss field. The cluster computes both `⟨B1g_op⟩` (classical JT order parameter) and `√⟨B1g_op²⟩` (RMS including quantum fluctuations).
+where `O = multi_op` (pre-built in `ModelParams.__post_init__`) and `J_bond = effective_superexchange(g_J, tx_bare, ty_bare, doping)` is the single-bond exchange (Z-factor applied at the call site). `ClusterMF` receives `multi_op` and `Z` as constructor arguments; the operator is not rebuilt per iteration. The boundary Weiss field scales as `g_J·(1−δ)`, consistent with the BdG Weiss field. The cluster computes both `⟨B1g_op⟩` (classical JT order parameter) and `√⟨B1g_op²⟩` (RMS including quantum fluctuations).
 
 **Cluster J_eff renormalisation (Hellmann–Feynman):** after diagonalizing H_cluster, a renormalised exchange is extracted via weighted covariance of the full spectrum:
 
@@ -484,7 +485,7 @@ where `O = multi_op` (pre-built in `ModelParams.__post_init__`). `ClusterMF` rec
 J_eff_cluster = Cov_w(E_n, ⟨O_AB⟩_n) / Var_w(⟨O_AB⟩_n)
 ```
 
-with Boltzmann weights `w_n = exp(−E_n/kT)/Z`. The result is clipped to `[0.5, 2.0] × J_eff_bare` to prevent runaway corrections and ensure SCF convergence. The ratio `_cluster_j_renorm = J_eff_cluster / J_eff_bare` feeds back into `J_alpha_beta_Q` as a vertex renormalization and is logged at convergence.
+with Boltzmann weights `w_n = exp(−E_n/kT)/Z`. The result is clipped to `[0.5, 2.0] × J_eff_bare` to prevent runaway corrections and ensure SCF convergence. The ratio `_cluster_j_renorm = J_eff_cluster / J_eff_bare` feeds back into `J_alpha_beta_Q` as a vertex renormalization and is logged at convergence. The lattice-summed result returned is `J_eff = Z · J_bond_cluster`.
 
 ### 19. Chemical Potential: Newton with Analytic ∂n/∂μ
 
@@ -716,21 +717,21 @@ All energies in **eV**, lengths in **Å**.
 
 | Parameter | Symbol | Default | Description |
 |---|---|---|---|
-| `t_pd` | t_pd | 0.500 eV | pd hybridisation integral (primary hopping; t₀ = t_pd²/Δ_CT derived) |
-| `u` | u | 14.5 | U/t₀ ratio; Hubbard U = u·t₀ |
-| `lambda_soc` | λ_SOC | 0.150 eV | Atomic SOC constant (t₂g shell); determines Γ₆–Γ₇ splitting |
-| `Delta_tetra` | Δ_tet | −0.150 eV | Tetragonal CF (**required < 0**); Δ_CF derived |
+| `t_pd` | t_pd | 0.440 eV | pd hybridisation integral (primary hopping; t₀ = t_pd²/Δ_CT derived) |
+| `u` | u | 8.0 | U/t₀ ratio; Hubbard U = u·t₀ |
+| `lambda_soc` | λ_SOC | 0.180 eV | Atomic SOC constant (t₂g shell); determines Γ₆–Γ₇ splitting |
+| `Delta_tetra` | Δ_tet | −0.300 eV | Tetragonal CF (**required < 0**); Δ_CF derived |
 | `g_JT` | g_JT | 0.150 eV/Å | Electron–phonon JT coupling |
-| `K_lattice` | K | 0.400 eV/Å² | Bare phonon stiffness; K_eff computed at runtime |
-| `lambda_hop` | λ_hop | 1.200 Å | Hopping decay: t(Q) = t₀·exp(±Q/λ) |
-| `Delta_CT` | Δ_CT | 2.200 eV | Charge-transfer gap (material-class constant) |
+| `K_lattice` | K | 0.800 eV/Å² | Bare phonon stiffness; K_eff computed at runtime |
+| `lambda_hop` | λ_hop | 1.100 Å | Hopping decay: t(Q) = t₀·exp(±Q/λ) |
+| `Delta_CT` | Δ_CT | 1.800 eV | Charge-transfer gap (material-class constant) |
 | `Delta_inplane` | Δ_ip | 0.020 eV | B₂g in-plane CF; splits Γ₇ doublet |
 | `omega_JT` | ω_JT | 0.057 eV | JT phonon frequency (~46 meV) |
 | `kT` | kT | 0.010 eV | Temperature (~116 K) |
 | `tol` | — | 1e-4 | Convergence threshold |
 | `Z` | Z | 4 | Coordination number |
 | `a` | a | 3.800 Å | In-plane lattice constant |
-| `target_doping` | δ | 0.27 | Default hole doping |
+| `target_doping` | δ | 0.22 | Default hole doping |
 
 ### Module-level SCF Constants
 
@@ -743,8 +744,9 @@ These are fixed at compile time and not Bayesian-optimised:
 | `_MIXING` | 0.05 | Anderson mixing weight |
 | `_MU_LM` | 3.5 | LM regularization floor for M Newton step |
 | `_ALPHA_HF` | 0.25 | Newton vs BdG fixpoint blend for M |
-| `_FS_N_VERTEX` | 100 | FS k-points used in the vertex q-loop |
+| `_FS_N_VERTEX` | 120 | FS k-points used in the vertex q-loop |
 | `_MORIYA_C` | 0.35 | Moriya damping prefactor α_M = C·δ·(t_eff/J_eff) |
+| `_ALPHA_MORIYA` | 0.15 | Moriya damping floor (prevents runaway at low doping) |
 | `_LAMBDA_JT_VIABLE` | 0.05 | Minimum λ_JT_sc for SC-triggered JT viability |
 | `_CHI_DQ_S_PADE_W` | 0.10 | Padé regularisation width for χ_DQ_s |
 | `_ANDERSON_TIKHONOV` | 1e-8 | Tikhonov β / diag_max in Anderson normal equations |
@@ -760,7 +762,7 @@ These are fixed at compile time and not Bayesian-optimised:
 | `multi_op` | `diag([1,−1,η,−η])` | Multipolar spin operator; pre-built and shared by cluster and BdG |
 | `_w6_xz` … `_w7_xy` | from eigenvector projections | d_xz/d_yz/d_xy orbital weights of Γ₆, Γ₇a; used for Q-dependent `η_J(Q)` in exchange tensor |
 | `t0` | t_pd²/Δ_CT | Effective dd hopping |
-| `J_CT` | 2t_pd⁴/Δ_CT²·(1/U+1/(Δ_CT+U/2)) | ZSA CT superexchange |
+| `J_CT` | 2t_pd⁴/Δ_CT²·(1/U+1/(Δ_CT+U/2)) | ZSA CT superexchange (single-bond) |
 | `U_mf` | Z·J_CT/2 | Bare Weiss-field amplitude (g_J·(1−δ) applied at runtime) |
 | `doping_0` | z_ZRS/(1−z_ZRS) | ZRS coherence crossover; floor in f_J(δ) only |
 
