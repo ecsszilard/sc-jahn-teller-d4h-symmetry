@@ -59,11 +59,12 @@ _V_CUT:             float = 20.0    # pairing vertex near-divergence detector th
 _G_T_COHERENCE_MIN: float = 0.10    # g_t = 2δ/(1+δ) floor for coherent ZRS band; below this δ < 0.053 the Fermi surface is incoherent.
                                     # Used in: _scf_jacobi_kick, post-SCF Mott filter, _eval_constraints H4, _score, and __main__ doping floor.
 _FS_SAMPLING:       float = 2.3     # integration window around the Fermi level
-_FS_N_VERTEX:       int   = 120     # FS k-points used in the vertex q-loop.
+_FS_N_VERTEX:       int   = 110     # FS k-points used in the vertex q-loop.
                                     # samples the full k-grid, angular resolution need to resolve the d-wave node at (π/2,π/2) and the B₁g anti-nodal hot spots.
 _Q_THR_REL:         float = 0.02    # fraction of lambda_hop; Q change below this skips vertex rebuild
 _M_THR_REL:         float = 0.03    # absolute M change threshold (M is O(0.1–0.5))
 _MU_LM:             float = 3.5     # Levenberg–Marquardt floor for M Newton step (default 4.0), larger → smaller γ_M → more conservative M update.
+_ALPHA_RENORM:      float = 0.4     # smooths out noise from quantum fluctuations
 _ALPHA_HF:          float = 0.25    # Newton vs BdG fixpoint blend for M update (0=fixpoint, 1=Newton; default 0.2)
 _NK:                int   = 80      # k-grid points per direction (even required for commensurate q_AFM=(π,π))
 _MAX_ITER:          int   = 400
@@ -1648,9 +1649,8 @@ class RMFT_Solver:
         if self.p.kT < _KT_FLOOR:
             F_total = evals[0]
         else:
-            E0 = evals[0]
-            weights = np.exp(-(evals - E0) / self.p.kT)
-            F_total = E0 - self.p.kT * np.log(weights.sum())
+            weights = np.exp(-(evals - evals[0]) / self.p.kT)
+            F_total = evals[0] - self.p.kT * np.log(weights.sum())
 
         # Magnetization observable
         M_A = self.cluster_mf.cluster_expectation(evals, evecs, self.multi_op, self.p.kT, site_index=0)
@@ -1679,16 +1679,16 @@ class RMFT_Solver:
         fit_weights = np.exp(-(evals - evals[0]) / T_fit)
         fit_weights /= fit_weights.sum()
         
-            # Weighted mean subtraction (for covariance)
-            corr_mean = np.sum(fit_weights * corr_vals)
-            E_mean    = np.sum(fit_weights * evals)
+        # Weighted mean subtraction (for covariance)
+        corr_mean = np.sum(fit_weights * corr_vals)
+        E_mean    = np.sum(fit_weights * evals)
 
-            dc = corr_vals - corr_mean
-            dE = evals - E_mean
+        dc = corr_vals - corr_mean
+        dE = evals - E_mean
 
-            # Weighted covariance
-            w_cov = np.sum(fit_weights * dE * dc)
-            w_var = np.sum(fit_weights * dc * dc)
+        # Weighted covariance
+        w_cov = np.sum(fit_weights * dE * dc)
+        w_var = np.sum(fit_weights * dc * dc)
 
         if w_var > _VAR_MIN:
             J_raw = w_cov / w_var
@@ -1944,7 +1944,7 @@ class RMFT_Solver:
             tx, ty = g_t * tx_bare, g_t * ty_bare
 
             F_cluster = self.compute_cluster_free_energy(M, Q, mu, g_J, tx_bare, ty_bare, target_doping)
-            _j_renorm_cur = F_cluster['j_renorm']
+            _j_renorm_cur = _ALPHA_RENORM * F_cluster['j_renorm'] + (1.0 - _ALPHA_RENORM) * _j_renorm_cur
 
             _vbdg_scf = self._get_vbdg()
             _bdg_ev_sc, _bdg_ec_sc = np.linalg.eigh(_vbdg_scf._build_H_stack(_vbdg_scf._kpts, M, Q, Delta_s, Delta_d, target_doping, mu, tx, ty, g_J, out=_vbdg_scf._H_stack))
@@ -1983,7 +1983,7 @@ class RMFT_Solver:
             _K_eff_update_needed = (
                 iteration == 0
                 or (iteration - _K_eff_last_iter >= 5 and abs(M - _K_eff_last_M) > 0.02)
-                or abs(_j_renorm_cur - _K_eff_last_j_renorm) > 0.05
+                or abs(F_cluster['j_renorm'] - _K_eff_last_j_renorm) > 0.05
                 or abs(Q - _K_eff_last_Q) > _Q_THR_REL * self.p.lambda_hop
             )
             if _K_eff_update_needed:
@@ -2000,26 +2000,6 @@ class RMFT_Solver:
             Delta_s_out, Delta_d_out, _vertex_cache = self._get_vbdg().compute_gap_eq_vectorized(
                 M, Q, Delta_s, Delta_d, target_doping, mu, tx, ty, g_J, _K_eff_scf, g_Delta_s, g_Delta_d, _j_renorm_cur,
                 _bdg_cache=(_bdg_ev_sc, _bdg_ec_sc), _vertex_cache=_vertex_cache)
-
-
-            dF_dM_0, d2F_dM2 = self.compute_dF_dM_and_d2F(M, Q, Delta_s, Delta_d, target_doping, mu, tx, ty, g_J, tau_x_anom_mf=tau_x_renorm)
-            self._scf_bdg_cache = None   # cache consumed; clear to prevent stale reuse
-
-            # Adaptive LM floor: large μ_LM can overdamp M even when Δ grows, freezing SC–AFM coupling.
-            # Use Delta_s_out + Delta_d_out so the M Newton step already knows about the SC gap that just opened this iteration.
-            _Delta_out_now = abs(Delta_s_out) + abs(Delta_d_out)
-            _mu_LM_eff = _MU_LM / (1.0 + 10.0 * _Delta_out_now / max(self.p.t0, 1e-9))
-
-            # LM denominator: d2F_dM2 + mu_LM_eff (positive shift guarantees a positive denominator while preserving sign)
-            # When d2F < 0 (saddle/instability), abs() would flip the Newton direction and push M away from the minimum, blocking convergence.
-            M_newton = M - dF_dM_0 / (d2F_dM2 + _mu_LM_eff)
-            # Safety: clamp Newton proposal to physical range before blending
-            M_newton = float(np.clip(M_newton, 0.0, 1.0))
-            # Self-consistent fixpoint: ⟨S_z⟩ = M from BdG Green function = ∂Ω_BdG/∂h|_{h→0}.
-            M_out = float(np.clip(
-                (1.0 - _ALPHA_HF) * M_bdg + _ALPHA_HF * M_newton,
-                0.0, 1.0
-            ))
             
             # Hellmann-Feynman lattice equilibrium: ∂F/∂Q = K_eff·Q + g_JT·⟨B̂₁g⟩ = 0
             # ⟹  Q_eq = −(g_JT / K_eff) · ⟨B̂₁g⟩
@@ -2039,15 +2019,30 @@ class RMFT_Solver:
             # Scale variables to similar magnitudes in the least-squares solve: M ×1,  Q ×1/λ_hop,  Δ_s ×t₀,  Δ_d ×t₀.
             _t0_sc = max(self.p.t0, 1e-6)
             _lhop  = max(self.p.lambda_hop, _KT_FLOOR)
-            x_in_4d  = np.array([M,             Q / _lhop,
-                                  abs(Delta_s) * _t0_sc, abs(Delta_d) * _t0_sc])
-            x_out_4d = np.array([M_out,             Q_out / _lhop,
-                                  abs(Delta_s_mixed) * _t0_sc, abs(Delta_d_mixed) * _t0_sc])
+            x_in_4d  = np.array([M,     Q / _lhop,     abs(Delta_s) * _t0_sc,       abs(Delta_d) * _t0_sc])
+            x_out_4d = np.array([M_bdg, Q_out / _lhop, abs(Delta_s_mixed) * _t0_sc, abs(Delta_d_mixed) * _t0_sc])
             scf_x_hist.append(x_in_4d)
             scf_f_hist.append(x_out_4d)
 
             x_new_4d = self._anderson_mix(scf_x_hist, scf_f_hist, m=5, alpha=_alpha)
-            M_mixed    = float(np.clip(x_new_4d[0], 0.0, 1.0))
+
+            dF_dM_0, d2F_dM2 = self.compute_dF_dM_and_d2F(M, Q, Delta_s, Delta_d, target_doping, mu, tx, ty, g_J, tau_x_anom_mf=tau_x_renorm)
+            self._scf_bdg_cache = None   # cache consumed; clear to prevent stale reuse
+
+            # Adaptive LM floor: large μ_LM can overdamp M even when Δ grows, freezing SC–AFM coupling.
+            # Use Delta_s_out + Delta_d_out so the M Newton step already knows about the SC gap that just opened this iteration.
+            _mu_LM_eff = _MU_LM / (1.0 + 10.0 * (abs(Delta_s_out) + abs(Delta_d_out)) / max(self.p.t0, 1e-9))
+
+            # LM denominator: d2F_dM2 + mu_LM_eff (positive shift guarantees a positive denominator while preserving sign)
+            # When d2F < 0 (saddle/instability), abs() would flip the Newton direction and push M away from the minimum, blocking convergence.
+            M_newton = M - dF_dM_0 / (d2F_dM2 + _mu_LM_eff)
+            # Safety: clamp Newton proposal to physical range before blending
+            M_newton = float(np.clip(M_newton, 0.0, 1.0))
+            # Self-consistent fixpoint: ⟨S_z⟩ = M from BdG Green function = ∂Ω_BdG/∂h|_{h→0}.
+            M_mixed = float(np.clip(
+                (1.0 - _ALPHA_HF) * x_new_4d[0] + _ALPHA_HF * M_newton,
+                0.0, 1.0
+            ))
             Q_mixed    = float(np.clip(x_new_4d[1] * _lhop, -0.5 * self.p.lambda_hop, 0.5 * self.p.lambda_hop))
 
             # Anderson updates |Δ| only; apply magnitude corrections but keep the phase from the linear-mix value (important for BdG).
