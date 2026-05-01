@@ -854,15 +854,19 @@ The flag `need_optimalization` (default `False`) controls whether the Bayesian o
 
 ### Iteration Log
 
-Each SCF step prints (thread-safe): M, Q, Δ_s, Δ_d, density n, μ, F, det_FM, det_AFM, K_eff, selection_ratio, j_renorm.
+Each SCF step prints (thread-safe, every `_LOG_PERIOD` iterations):
+
+```
+[SCF] δ=…  iter/max  conv=…  M=…  Q=…  |Δ|=…  J_eff=… eV  j_renorm=…  mu=…
+      dFM=…  dAFM=…  V_s=…  V_d=…  [⚠low-var] [⚠same-sign]
+      Λ_inst=…  α=…  [STABLE | AFM-QCP (critical) | FM-QCP (q≈0 critical) | PAST-QCP (AFM unstable)]  …s/it
+```
+
+`⚠low-var` and `⚠same-sign` appear only when the V_mat structure diagnostic flags are active (requires `N_fs > _VERTEX_DIAG_MIN_FS`).
 
 ### Convergence Report
 
-At convergence, two log lines are printed:
-
-**Line 1:** converged order parameters, Hessian summary (H=[λ₀,λ₁,λ₂] ✓MIN or ⚠SADDLE), gap symmetry, λ_max, JT active flag (selection_ratio > 0.05), coherence length note.
-
-**Line 2:** χ_AFM diagnostics — `χ_DD_s`, `χ_moriya`, `J·χ`, `det_AFM`, near-QCP flag, `j_renorm`.
+At convergence, the main SCF-RES line prints: converged order parameters (M, Q, |Δ_s|, |Δ_d|), density n, μ, F_bdg, j_renorm, det_AFM, JT flag (selection_ratio > 0.05), SCF dynamics regime (`converging` / `limit_cycle` / `first_order_jump` / `hysteretic`), and `⚠ ANSATZ UNSTABLE` if `det(RPA) < 0` was observed at any iteration.
 
 Additionally: channel decomposition (λ_s vs λ_d), λ_JT, λ_JT_sc, λ_JT_kernel, ∂λ_pair/∂Q, SC-triggered JT confirmation (hessian_lmin_sc < −kT), 2Δ₀/kTc, χ_τ breakdown (chi_tau_sc, chi_tau_n, δχ_τ, richardson_ok). SC-JT window diagnostics (K_eff, K_spont, K_SC, K_opt, K_distance, in_window, lambda_JT_sc, lambda_JT_opt). Incommensurate AFM scan result (dq_max/π, χ ratio, auto-retry outcome if triggered).
 
@@ -894,12 +898,12 @@ With BO results, a 4th row: BO progress (Δ and score vs. evaluation), doping vs
 | 4×4 BdG truncation | Valid when Δ_CF ≫ kT and Γ₇split/Δ_CF ≪ 1; monitored via `(J_eff/Δ_CF)²` projection-quality penalty in scoring |
 | No spatial fluctuations | Cannot describe pseudogap, stripes, or phase separation |
 | RPA static (ω = 0) | Dynamical vertex corrections absent |
-| K_eff updated every 5 SCF iterations | Back-action of Q on exchange rigidity approximate during SCF transient |
+| `K_eff` update conditional | Updated when: first iteration, `Q` changes beyond `_Q_THR_REL`, at least 5 iterations have passed **and** `\|ΔM\| > 0.02`, or `\|Δj_renorm\| > 0.05`. Back-action of Q on exchange rigidity approximate during SCF transient |
 | χ_τ at post-convergence only | Self-consistent Q back-action on chi_tau neglected during SCF |
 | `compute_G_instability` at Δ=0 | G-matrix evaluates normal-state only; SC-triggered JT confirmed via post-SCF Hessian λ_min < −kT |
 | ∂λ_pair/∂Q at frozen Fermi surface | FS geometry frozen at middle Q; SC-state version would require Bogoliubov Lindhard sum |
 | δχ_τ baseline subtraction approximate in D₂h | Normal-state B1g response at finite Δ_inplane estimated at Δ=0; small D₂h corrections to χ_τ_n neglected |
-| Incommensurate AFM auto-retry single recursion | If the softened-seed retry also shows incommensurate tendency, it is not further recursed; result may still be commensurate-biased |
+| `scf_dynamics_regime` classification | `first_order_jump` and `hysteretic` trigger parallel multi-seed restart (4 seeds, lowest free energy wins); `limit_cycle` only damps α. True first-order bistability may still not converge to a unique fixed point. |
 | z_qp = 1/r_J proxy | Cluster r_J is a local (q=0) proxy for the k-dependent quasiparticle weight; unreliable near the Mott boundary |
 
 ---
