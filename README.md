@@ -35,8 +35,10 @@ The selection rule is enforced by the B₁g phonon operator `B1g_op = real(U₄�
 SC-triggered JT activation is tracked by a **selection ratio**:
 
 ```
-selection_ratio = min(|Δ_s| + |Δ_d|, Δ_CF) / Δ_CF · |⟨τ_x⟩_BdG|
+selection_ratio = clip(|Δ_s| + |Δ_d|, 0, Δ_CF) / Δ_CF · |⟨τ_x⟩_anom|
 ```
+
+where `⟨τ_x⟩_anom` is the **anomalous** SC-induced orbital coherence from the off-diagonal BdG u·v amplitudes (output of `_compute_orbital_coherence_from_pairs`), not the general normal-state `⟨τ_x⟩_BdG`. This quantity is exactly zero at Δ=0 by construction.
 
 Values above 0.05 indicate that the condensate has lifted the B₁g symmetry barrier sufficiently for JT to be active. This is computed directly from the converged BdG state.
 
@@ -73,7 +75,7 @@ When the superconducting condensate — via Γ₆–Γ₇ orbital mixing — cre
 
 This loop is numerically sensitive and can oscillate or diverge if not treated carefully. Three stabilization mechanisms are in place:
 
-- **Anderson mixing:** the four-dimensional order-parameter vector `[M, Q/λ_hop, |Δ_s|·t₀, |Δ_d|·t₀]` is accelerated jointly via Anderson(5), capturing the cross-coupling ∂M/∂Δ and ∂Δ/∂M in the effective Jacobian.
+- **Anderson mixing:** the four-dimensional order-parameter vector `[M, Q/λ_hop, |Δ_s|/t₀, |Δ_d|/t₀]` is accelerated jointly via Anderson(5), capturing the cross-coupling ∂M/∂Δ and ∂Δ/∂M in the effective Jacobian.
 - **Tikhonov regularization:** the Anderson normal equations use a Tikhonov shift (`_ANDERSON_TIKHONOV = 1e-8 × diag_max`) that prevents the least-squares solve from amplifying noise in the residual history.
 - **Jacobi kick (`_scf_jacobi_kick`):** before the main SCF loop, the linearized Jacobian eigenvalue λ₊ of the two-channel (Δ, Q) map is estimated analytically. This determines the initial seed values for (M, Q, Δ) and the initial mixing rate α, so that the SCF starts in the basin of the correct physical fixed point rather than at an arbitrary initialization.
 
@@ -91,10 +93,12 @@ The lattice update in the SCF loop uses the **full** `⟨B̂₁g⟩ = Tr[B1g_16 
 The `⟨B1g_exp⟩` computation correctly accounts for the Nambu structure via a `/4` normalisation factor that corrects for both the particle–hole (Nambu) doubling and the two-sublattice (A–B) doubling simultaneously:
 
 ```python
-Bdiag_qp = einsum('kna,knb,ab->kn', ec.conj(), ec, B1g_16).real
+Bdiag_qp = einsum('kan,ab,kbn->kn', ec.conj(), B1g_16, ec).real
 exp_k    = einsum('kn,kn->k', Bdiag_qp, f)
 B1g_exp  = dot(k_weights, exp_k) / 4.0
 ```
+
+where `k` indexes k-points, `a,b` index the 16 Nambu components (rows/columns of B1g_16), and `n` indexes BdG bands (columns of `ec`).
 
 The hole-block sign (`−B1g_op^T`) is already encoded in `B1g_16`, so weighting by `f` alone (not `fbar`) correctly accounts for both particle and hole contributions.
 
@@ -197,7 +201,7 @@ ty(Q) = t₀ · exp(−Q / λ_hop)
 K_eff = K_lattice + ∂²F_ex/∂Q²
 ```
 
-`K_lattice` is the **bare phonon spring constant** (primary input, eV/Å²). `∂²F_ex/∂Q²` is computed by `compute_JT_rigidity_from_exchange` via central finite-difference of `⟨O_α(Q)⟩`; negative when the SC condensate softens the JT mode. `K_lattice` is never mutated; `K_eff` is recomputed every 5 SCF iterations or when `|ΔQ| > _Q_THR_REL·λ_hop` or `|ΔM| > 0.02`, tracked via separate `_K_eff_last_Q` and `_K_eff_last_M` variables.
+`K_lattice` is the **bare phonon spring constant** (primary input, eV/Å²). `∂²F_ex/∂Q²` is computed by `compute_JT_rigidity_from_exchange` via central finite-difference of `⟨O_α(Q)⟩`; negative when the SC condensate softens the JT mode. `K_lattice` is never mutated;
 
 The SC-triggered JT coupling strength:
 ```
@@ -269,8 +273,10 @@ Both terms carry a **positive sign**: `|v|²·(1−f)` is the filled-band electr
 An inline selection ratio tracks how much the SC condensate has lifted the B₁g symmetry barrier:
 
 ```
-selection_ratio = min(|Δ_s| + |Δ_d|, Δ_CF) / Δ_CF · |⟨τ_x⟩_BdG|
+selection_ratio = clip(|Δ_s| + |Δ_d|, 0, Δ_CF) / Δ_CF · |⟨τ_x⟩_anom|
 ```
+
+where `⟨τ_x⟩_anom` is the anomalous SC-induced orbital coherence from `_compute_orbital_coherence_from_pairs` — not the general normal-state `⟨τ_x⟩_BdG`. It is exactly zero when Δ=0 or Q=0, enforcing the D₄h selection rule.
 
 - `selection_ratio ≈ 0`: pure AFM state — B1g_op strictly off-diagonal → ⟨B1g_op⟩ = 0, JT forbidden (exact in D₄h).
 - `selection_ratio > 0.05`: SC-mixed state — condensate has opened the B₁g channel → JT active.
@@ -334,13 +340,15 @@ The pairing vertex is computed via a 2×2 coupled spin–JT RPA in `[spin, JT-ph
 V(q) = J_eff² χ_DD_s^RPA(q) + V_JT² χ_QQ^RPA(q) + J_eff V_JT [χ_DQ_s^RPA(q) + χ_QD_s^RPA(q)]
 ```
 
-The bare susceptibilities χ₀(q) come from the Δ=0 BdG Hamiltonian via the Lindhard formula (4×4 orbital tensor, 8 normal Nambu sector pairs). The static Lindhard function is real by time-reversal symmetry — the imaginary part vanishes exactly at ω=0, so taking `chi0_tensor = chi0.real` after enforcing Hermiticity discards only numerical roundoff, not physical information. Projections:
+The bare susceptibilities χ₀(q) come from the Δ=0 BdG Hamiltonian via the Lindhard formula, implemented in the module-level `_lindhard_bubble()` function using `opt_einsum`. The Lindhard sum is split by Nambu sector pairs: `_NORMAL_SECTOR_PAIRS` (8 pairs: AA/BB particle and hole blocks, plus AB/BA cross terms) covers all normal-state contributions; `_ANOM_SECTOR_PAIRS` (4 particle↔hole pairs activated by Bogoliubov rotation) covers the SC-state anomalous cross-susceptibility χ_DQ^SC that is exactly zero at Δ=0 by the B₂g selection rule. The static Lindhard function is real by time-reversal symmetry — the imaginary part vanishes exactly at ω=0, so taking `chi0_tensor = chi0.real` after enforcing Hermiticity discards only numerical roundoff, not physical information. Projections:
 
 ```
 χ_DD_s = Tr[Sz · χ₀[Γ₆,Γ₆] · Sz]      # spin–spin (dipole–dipole)
 χ_DQ_s = Tr[Sz · χ₀[Γ₆,Γ₇]]            # spin–orbital cross (dipole–quadrupole)
 χ_QQ   = −∂²Ω/∂Q²  (numerical, SC state)  # orbital JT stiffness [eV/Å²]
 ```
+
+**PSD projection of [[χ_SS, χ_SQ], [χ_SQ, χ_QQ]]:** near the QCP the Cauchy–Schwarz condition χ_SQ² ≤ χ_SS · χ_QQ can be violated by numerical noise in the Lindhard sum. After computing (χ_SS, χ_SQ, χ_QQ), the 2×2 matrix is projected to the nearest positive-semidefinite matrix via eigendecomposition and clamping of negative eigenvalues to zero (Higham 1988). This is applied both in `get_susceptibilities_normal` (per q-point in the RPA loop) and in `compute_G_instability` (at q=0 for the G3 matrix). A `PSD-CHI` log line is emitted when the correction exceeds 1%.
 
 The cross-terms χ_DQ_s and χ_QD_s are **zero in the normal state at Q=0** (Γ₆–Γ₇ mixing forbidden) and become nonzero when Q > 0 opens the B₁g channel via B1g_op. A Padé resummation regularizes χ_DQ_s:
 
@@ -370,7 +378,9 @@ This ensures `Γ_M → 0` at half-filling (long-range AFM, no damping) and grows
 
 **RPA determinant treatment past the QCP:** when `det > 0` a floor `_RPA_DET_REG = 1e-9` guards against exact-zero numerical accidents only. When `det < 0` (past the QCP) the determinant is left intact — applying a soft cap to the vertex in this regime would trap the SCF in the unstable phase. The universal vertex cap `_RPA_V_SOFT_CAP = 50 eV` prevents numerical overflow without altering the sign or divergence character of V(q).
 
-**Correlation correction to Moriya damping:** the quasiparticle weight `z_qp = 1/r_J` (from cluster-ED) introduces an excess `r_J_excess = max(0, r_J − 1)`. Only the overcorrelated part (r_J > 1) boosts Γ_M — at most doubling it — to prevent RPA runaway from vertex corrections that exceed the Gutzwiller-band picture. The `χ₀` bubble is left untouched: Ward identities require that the quasiparticle weight from the bubble (Z²) and the vertex correction (1/Z) cancel to Z, which is already encoded in the Gutzwiller-renormalized BdG bands feeding `χ₀`.
+**Correlation correction to Moriya damping:** the quasiparticle weight `z_qp = 1/r_J` (from cluster-ED) introduces an excess `r_J_excess = max(0, r_J − 1)`. Only the overcorrelated part (r_J > 1) boosts Γ_M — at most doubling it — to prevent RPA runaway from vertex corrections that exceed the Gutzwiller-band picture. The `χ₀` bubble is left untouched: Ward identities require that the quasiparticle weight from the bubble (Z²) and the vertex correction (1/Z) cancel to Z, which is already encoded in the Gutzwiller-renormalized BdG bands feeding `χ₀`. A warning is logged when `z_qp < 0.35` (near Mott boundary) because `r_J_eff = 1/z_qp` is an unreliable proxy for the momentum-dependent quasiparticle weight in that regime.
+
+**χ_SQ(q) full BZ scan:** `estimate_chi_SQ_q()` evaluates the spin–quadrupole cross-susceptibility χ_SQ(q) over a coarse 12×12 q-grid using `_lindhard_bubble` with `_NORMAL_SECTOR_PAIRS`. This is a pre-SCF or post-convergence diagnostic (called from `compute_G_instability` when `|Δ_inplane| > 0`). In D₄h (Δ_ip = 0) χ_SQ = 0 exactly at all q by the selection rule Γ(S_z)⊗Γ(τ_x) = B₂g ⊄ A₁g; a finite numerical value indicates grid noise. In D₂h (Δ_ip ≠ 0) the peak near q=(π,π) controls the RPA cross-term enhancement and the SC-JT window width. The scan returns: `chi_SQ_q(q)`, `chi_SS_q(q)`, Cauchy–Schwarz ratio `χ_SQ²/(χ_SS·χ_QQ₀)` (a conservative lower-bound PSD check since χ_QQ(q) ≤ χ_QQ(0) for the zone-centre B₁g mode), `q_peak`, `psd_violations`, `symmetry_ok`, and `antinodal_fraction` (fraction of |χ_SQ| weight near (π,0)/(0,π), confirming d-wave symmetry of the cross-channel).
 
 **Separate QCP tracking:** the vertex cache separately monitors the FM instability at q=0 (`det_q0`) and the AFM instability at q=(π,π) (`det_afm`). The SCF adaptive mixing and convergence tolerance respond to `det_afm`; the FM check guards against accidental ferromagnetic divergence. Both determinants are logged at convergence.
 
@@ -537,6 +547,12 @@ Module-level SCF constants (not in ModelParams):
     _MU_LM = 3.1      # LM regularization floor for M Newton step
     _ALPHA_HF = 0.31  # Newton vs BdG fixpoint blend for M
 
+Module-level Lindhard infrastructure:
+    _NORMAL_SECTOR_PAIRS  # 8 Nambu sector pairs for normal-state χ₀ (particle and hole, AA/BB/AB/BA)
+    _ANOM_SECTOR_PAIRS    # 4 particle↔hole pairs for SC-state χ_DQ^SC (zero at Δ=0 by selection rule)
+    _lindhard_bubble(sector_pairs, E_k, V_k, f_k, shift_idx, w, eta, fermi_fn)
+                          # opt_einsum Lindhard sum; Hermitised ×0.5; shared by all χ computations
+
 ClusterMF  (2-site exact diagonalization)
     ├── __init__(multi_op, Z)           — receives pre-built multi_op from ModelParams
     ├── build_cluster_hamiltonian(...)  — Weiss field scales as g_J·(1−δ)
@@ -561,7 +577,10 @@ RMFT_Solver
     │       returns: chi_DD_s, chi_DD_s_moriya, rpa_factor, afm_unstable
     ├── solve_linearized_gap_equation(.) λ_max, gap vector, arc-length weights, λ_JT_kernel, gap symmetry
     ├── compute_G_instability(δ, M,
-    │       compute_dlambda=True)        G3 matrix, ∂λ_pair/∂Q, Tc estimate
+    │       compute_dlambda=True)        G3 matrix, ∂λ_pair/∂Q, Tc estimate,
+    │                                    PSD projection at q=0, χ_SQ(q) BZ scan (D₂h only)
+    ├── estimate_chi_SQ_q(δ, M, μ, n_q) coarse 12×12 BZ scan of χ_SQ(q); PSD diagnostics,
+    │                                    q_peak, antinodal_fraction; skipped at Δ_ip≈0
     ├── compute_hessian(M, Q, Δ, δ, μ,
     │       g_t, g_J, Δ_s_frac,
     │       V_s, V_d, K_eff, [cache])   post-SCF SC-JT Hessian (3×3 curvature)
@@ -672,11 +691,11 @@ Anderson(5)-accelerated iteration over (M, Q, Δ_s, Δ_d, μ):
 2. Compute `tau_x = obs['tau_x']` (off-diagonal Γ₆↔Γ₇ mixing) and `B1g_exp = obs['B1g_exp']` (full Hellmann–Feynman force) from `compute_observables_vectorized`.
 3. Update M via Levenberg–Marquardt-regularized Newton step + BdG fixpoint blend `(1−_ALPHA_HF)·fixpoint + _ALPHA_HF·Newton`. LM floor `_MU_LM = 3.5` decreases as `|Δ|` grows.
 4. Inject anomalous orbital coherence `⟨τ_x⟩_anom` (from SC condensate, computed via `_compute_orbital_coherence_from_pairs`) into the Weiss field when Δ≠0 and Q≠0, then rebuild BdG cache. This is the mean-field back-action loop.
-5. Update `K_eff` on iteration 0 and when `|ΔQ| > _Q_THR_REL·λ_hop` or `|ΔM| > 0.02`, tracked via `_K_eff_last_Q` and `_K_eff_last_M`.
+5. Update `K_eff` on iteration 0 and when `|ΔQ| > _Q_THR_REL·λ_hop` (Å) **and** at least 5 iterations have passed since the last update with `|ΔM| > 0.02`, or `|Δj_renorm| > 0.05`, tracked via `_K_eff_last_Q`, `_K_eff_last_M`, `_K_eff_last_iter`, and `_K_eff_last_j_renorm`.
 6. Solve gap equations for (Δ_s_out, Δ_d_out) via RPA vertex fixed-point. Blend in 2×2 pairing kernel eigenvector direction (weight `_ALPHA_MIX_2X2 = 0.35`) to prevent channel locking.
 7. Update cluster free energy (DMFT-like vertex renormalization of J_eff via Hellmann–Feynman extraction from full cluster spectrum).
 8. **Update Q via Hellmann–Feynman every `_Q_UPDATE_PERIOD` iterations:** `Q_out = −(g_JT/K_eff)·B1g_exp` (full B1g operator, not just τ_x).
-9. Apply Anderson(5) acceleration to `[M, Q/λ_hop, |Δ_s|·t0, |Δ_d|·t0]` jointly.
+9. Apply Anderson(5) acceleration to `[M, Q/λ_hop, |Δ_s|/t₀, |Δ_d|/t₀]` jointly.
 10. Find μ to enforce `⟨n⟩ = 1 − δ`; reuse `(ev, ec)` from μ-search; compute F_BdG and F_cluster.
 11. Adaptive mixing every 5 iters: halve α on divergence (max_diff > 1.05×prev), boost ×1.35 when `selection_ratio > 0.05` and `|Q| > 1e-4` (JT-active), damp ×0.8 when JT-inactive, cap near AFM QCP (×0.6); reset Anderson history on divergence, stagnation, or Q sign flip. Limit-cycle detector reduces α by `_CYCLE_DAMP_FAC` on oscillation.
 
@@ -714,7 +733,7 @@ The result dict includes: all converged order parameters, Hessian eigenvalues, G
 - S5 (w=0.100): G22-margin > `_DE_G22M_SAFE = 0.25` — distance from the spontaneous-JT boundary; `S5 = 1 − tanh(G22 / _DE_G22M_SAFE)` continuously penalises proximity to G22 = 0
 
 **Scoring (`_score`)** — three-tier multiplicative architecture:
-- *Tier 1 (hard guards):* Mott/incoherence guard (`g_t < 0.10` or `ξ/a < 1`), `J·χ_DD_s(Moriya) > 2` → score = 0. Projection-quality penalty for large `(J_eff/Δ_CF)²`.
+- *Tier 1 (hard guards):* Mott/incoherence guard (`g_t < 0.10` or `ξ/a < 1`), `J·χ_DD_s(Moriya) > 2` → score = 0. Projection-quality penalty `proj_factor = 1 − 0.5·clip((J_eff/Δ_CF)², 0, 1)` accounts for Γ₇b contamination when the BdG truncation to Γ₆⊕Γ₇a is not fully valid; `proj_factor` is applied as a multiplicative factor on the final score.
 - *Tier 2 (smooth mechanism weights):*
   - `w_lJT`: parabolic arch on [0,1], peak at λ_JT = 0.45
   - `w_lJT_kernel`: sigmoid(10·(lJTk − 0.05))
@@ -898,7 +917,7 @@ With BO results, a 4th row: BO progress (Δ and score vs. evaluation), doping vs
 | 4×4 BdG truncation | Valid when Δ_CF ≫ kT and Γ₇split/Δ_CF ≪ 1; monitored via `(J_eff/Δ_CF)²` projection-quality penalty in scoring |
 | No spatial fluctuations | Cannot describe pseudogap, stripes, or phase separation |
 | RPA static (ω = 0) | Dynamical vertex corrections absent |
-| `K_eff` update conditional | Updated when: first iteration, `Q` changes beyond `_Q_THR_REL`, at least 5 iterations have passed **and** `\|ΔM\| > 0.02`, or `\|Δj_renorm\| > 0.05`. Back-action of Q on exchange rigidity approximate during SCF transient |
+| `K_eff` update conditional | Updated when: first iteration, `Q` changes beyond `_Q_THR_REL · λ_hop` (Å), at least 5 iterations have passed **and** `\|ΔM\| > 0.02`, or `\|Δj_renorm\| > 0.05`. Back-action of Q on exchange rigidity approximate during SCF transient |
 | χ_τ at post-convergence only | Self-consistent Q back-action on chi_tau neglected during SCF |
 | `compute_G_instability` at Δ=0 | G-matrix evaluates normal-state only; SC-triggered JT confirmed via post-SCF Hessian λ_min < −kT |
 | ∂λ_pair/∂Q at frozen Fermi surface | FS geometry frozen at middle Q; SC-state version would require Bogoliubov Lindhard sum |
