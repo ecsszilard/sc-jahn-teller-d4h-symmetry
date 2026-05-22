@@ -334,7 +334,7 @@ The orbital JT susceptibility `χ_QQ = −∂²Ω/∂Q²` is evaluated numerical
 
 ### 12. Coupled Spin–JT RPA Vertex and ∂λ_pair/∂Q
 
-The pairing vertex is computed via a 2×2 coupled spin–JT RPA in `[spin, JT-phonon]` channel space. The bare interaction matrix is **diagonal**: `Û = diag(J_eff, V_JT)` — there is no bare S–Q cross-vertex; the spin–JT feedback enters exclusively through the off-diagonal susceptibilities χ_DQ_s/χ_QD_s, which are opened by SOC and the SC condensate:
+The pairing vertex is computed via a 2×2 coupled spin–JT RPA in `[spin, JT-phonon]` channel space. `get_susceptibilities_normal` returns a plain tuple `(chi_DD_s_moriya, chi_DQ_s, chi_QD_s, chi_QQ_tilde, Gamma_M_eff)`; callers destructure it directly. The vertex is then evaluated by calling `self._rpa_vertex(J, V, ...)` explicitly for each required combination (full vertex with J and V_JT; spin-only with V_JT=0; JT-only with J=0) rather than reading named keys from a dict. The bare interaction matrix is **diagonal**: `Û = diag(J_eff, V_JT)` — there is no bare S–Q cross-vertex; the spin–JT feedback enters exclusively through the off-diagonal susceptibilities χ_DQ_s/χ_QD_s, which are opened by SOC and the SC condensate:
 
 ```
 V(q) = J_eff² χ_DD_s^RPA(q) + V_JT² χ_QQ^RPA(q) + J_eff V_JT [χ_DQ_s^RPA(q) + χ_QD_s^RPA(q)]
@@ -368,6 +368,8 @@ which is continuous and differentiable, saturates at `K_bare/V_JT` as χ_QQ→�
 det = (1 − J_eff·χ_DD_s_moriya)(1 − V_JT·χ_QQ_eff/K) − J_eff·V_JT·χ_DQ_s_v·χ_QD_s_v
 ```
 
+Moriya damping is split across two call sites: `_Gamma_M_bare` is computed once via `_make_vertex_params(target_doping, ...)` and passed to `get_susceptibilities_normal` as the susceptibility damping. Inside `compute_gap_eq_vectorized`, the per-q RPA loop computes `_Gamma_M_act = moriya_gamma(target_doping, ...)`. The earlier draft used `actual_doping` here but that was reverted: the susceptibility bubble is a normal-state quantity evaluated at the lattice filling, which is `target_doping`; using `actual_doping` introduced an inconsistency with the susceptibility call.
+
 Spin fluctuations are regularised by Moriya damping (doping-dependent) rather than a hard cutoff:
 
 ```
@@ -395,13 +397,13 @@ The pairing kernel on the Fermi surface:
 Γ_ij = g_Δ · √(dl_i/vF_i) · V(k_i − k_j) · √(dl_j/vF_j)
 ```
 
-Arc-length weights `dl_i` ensure proper Fermi-surface integration measure. `λ_max` = largest eigenvalue of Γ, with gap eigenvector φ_max. C₄ symmetry averaging is applied only when Q ≈ 0 (unbroken D₄h). The **JT-channel Rayleigh projection**:
+The integration weight is the proper FS measure: `inv_vF_i = dl_i / ((2π)² · |vF_i|)` where `dl_i` comes from `_fs_arc_lengths` and `|vF_i|` is floored at `_VF_FLOOR_TIGHT`. This replaces the earlier `1/|vF|` approximation (which omitted the arc-length factor), giving a correctly normalised `∫…dS/|vF|` kernel. `g_t` is now an explicit parameter; when `actual_doping=None`, vertex params use `_eff_doping = actual_doping if actual_doping is not None else target_doping`. `λ_max` = largest eigenvalue of Γ, with gap eigenvector φ_max. C₄ symmetry averaging is applied only when Q ≈ 0 (unbroken D₄h). The **JT-channel Rayleigh projection**:
 ```
 λ_JT_kernel = φ_max^T · Γ_JT · φ_max
 ```
-measures how much of λ_max comes specifically from the JT channel (V_JT component of V(q)), independently of the spin-fluctuation contribution. This is distinct from `lambda_JT_sc = (g²/K)·chi_tau_sc`, which is a scalar q=0 estimate.
+measures how much of λ_max comes specifically from the JT channel (V_JT component of V(q)). Because `eigh` returns unit-norm eigenvectors, the explicit re-normalisation of `gap_vector` before the Rayleigh quotient is redundant and has been removed. This is distinct from `lambda_JT_sc = (g²/K)·chi_tau_sc`, which is a scalar q=0 estimate.
 
-The gap vector is projected onto s-wave and d-wave basis functions to determine the dominant pairing symmetry; channel-specific Gutzwiller factors `g_Delta_s` and `g_Delta_d` are applied separately. A 2×2 pairing kernel matrix in (s, d) channel space is also constructed to guide the SCF update direction toward the dominant instability even when `|Δ| ≈ 0`.
+The gap vector lives in the `√(dl/vF)`-weighted Hilbert space. Projections onto s-wave and d-wave channels use `psi_s = φ_s · √(inv_vF)` and `psi_d = φ_d · √(inv_vF)` (both normalised), ensuring the L2 inner product is correct in the weighted basis. Channel-specific Gutzwiller factors `g_Delta_s` and `g_Delta_d` are applied separately. A 2×2 pairing kernel matrix in (s, d) channel space is also constructed to guide the SCF update direction toward the dominant instability even when `|Δ| ≈ 0`.
 
 ### 14. G-Matrix: SC–JT Coupled Instability
 
@@ -450,7 +452,7 @@ Two λ_JT metrics are tracked:
 Two independent Tc estimates are computed. A preliminary log block (`TC-PRELIM`) is printed before Bayesian optimisation:
 
 - **Tc₁ (G-BCS analytic):** uses `λ_eff = N_eff · V_eff` from the G-matrix (Schur-complement corrected), giving a pre-SCF upper bound.
-- **Tc₂ (λ_max-BCS):** `Tc = 1.13 · ω_c · exp(−1/λ_max)` with cutoff `ω_c = max(t_eff, ω_JT)`. In the SC-triggered JT picture the JT phonon energy `ω_JT` sets the relevant boson scale when it exceeds the effective bandwidth.
+- **Tc₂ (λ_max-BCS):** `Tc = _BCS_TC_PREFACTOR · ω_c · exp(−1/λ_max)` (1.13 × BCS weak-coupling) with cutoff `ω_c = max(t_eff, ω_JT)`. In the SC-triggered JT picture the JT phonon energy `ω_JT` sets the relevant boson scale when it exceeds the effective bandwidth.
 
 Post-optimisation:
 - `compute_Tc_by_gap_suppression`: bisects in T to find where `|Δ(T)| < Delta_tol` via full re-SCF with warm-starting from a normal-state seed (Δ ≈ 0) at each temperature. Finds only the spinodal (second-order instability boundary).
@@ -524,7 +526,7 @@ F_AA_BZ = Σ_k w_k · Pair_s(k) / 4    (on-site s-channel)
 F_AB_BZ = Σ_k w_k · Pair_d(k) / 4    (inter-site d-channel; d-wave projection on vertex side)
 ```
 
-The `/4` corrects for the 16-dimensional BdG space doubling. The d-wave projection is applied via an explicit `φ(k)` projection of `V(k−k')`. `V_d_scalar` is clamped to be non-negative; when fewer than 6 Fermi-surface points are available or no d-wave amplitude is present, `V_d_scalar = 0` (d-channel contributes nothing) rather than falling back to the s-channel value.
+The `/4` corrects for the 16-dimensional BdG space doubling. The d-wave projection is applied via an explicit `φ(k)` projection of `V(k−k')`. `V_d_scalar` is clamped to be non-negative; when fewer than 6 Fermi-surface points are available or no d-wave amplitude is present, `V_d_scalar = 0`. Both `V_s_scalar` and `V_d_scalar` are clamped to `[−V_cap, +V_cap]` before being stored in the vertex cache. `compute_gap_eq_vectorized` also performs an early-exit guard (`return` with zeros) when `_get_FS_points` returns fewer than 4 points, preventing downstream division-by-zero in the arc-length weight.
 
 ---
 
@@ -547,6 +549,13 @@ Module-level SCF constants (not in ModelParams):
     _MU_LM = 3.1      # LM regularization floor for M Newton step
     _ALPHA_HF = 0.31  # Newton vs BdG fixpoint blend for M
 
+Instance methods on RMFT_Solver (moved from module-level free functions):
+Instance methods on RMFT_Solver:
+    ├── _rpa_det(self, J, V, chi_DD_s_moriya, chi_DQ_s_v, chi_QD_s_v, chi_QQ_tilde)
+    │                             # returns (det, a, b, c, d); det used for QCP tracking
+    ├── _rpa_vertex(self, J, V, chi_DD_s_moriya, chi_DQ_s_v, chi_QD_s_v, chi_QQ_tilde, V_cap)
+    │                             # full RPA pairing vertex with Frobenius-norm floor and V_cap
+
 Module-level Lindhard infrastructure:
     _NORMAL_SECTOR_PAIRS  # 8 Nambu sector pairs for normal-state χ₀ (particle and hole, AA/BB/AB/BA)
     _ANOM_SECTOR_PAIRS    # 4 particle↔hole pairs for SC-state χ_DQ^SC (zero at Δ=0 by selection rule)
@@ -567,15 +576,19 @@ RMFT_Solver
     ├── SusceptibilityMixin
     │   ├── get_susceptibilities_fast    analytic 2-band (DE scout, G-matrix pre-SCF)
     │   ├── get_susceptibilities_normal  full Lindhard χ₀(q) tensor (pairing vertex)
-    │   │       returns: chi_DD_s, chi_DQ_s, chi_QD_s, chi_DD_s_moriya, rpa_det, ...
+    │   │       returns: (chi_DD_s_moriya, chi_DQ_s, chi_QD_s, chi_QQ_tilde, Gamma_M_eff)  ← tuple
     │   └── get_susceptibilities_sc      SC-state χ_QQ via ∂²Ω/∂Q²
     ├── _get_chi0_norm_cache(...)        Δ=0 eigenvector cache across q-loop and iterations
+    ├── _make_vertex_params(doping, tx, ty, g_t, J_eff, K_eff)  Γ_M_bare, V_JT, V_cap — shared by all RPA call sites
+    ├── _unique_q_pairs(fs_pts)          deduplicated q=k_i−k_j with q↔−q canonical reduction; static method
+    ├── _fs_arc_lengths(pts)             arc-length element dl_i per FS point (angle-sorted neighbours); static method
+    │                                    used as proper FS integration measure: ∫…dS/|vF| → Σ dl_i/|vF_i|
     ├── _rebuild_orbital_operators()     rebuild B1g_op, B1g_16, multi_op, sz_op after SOC/CF change
     ├── _reset_transient_state()         safe clone reset for parallel workers
     ├── compute_chi0_tensor(...)         (4,4) orbital susceptibility tensor
     ├── compute_static_chi0_afm(...)     q=0 static χ_DD_s in folded 2-sublattice BdG
     │       returns: chi_DD_s, chi_DD_s_moriya, rpa_factor, afm_unstable
-    ├── solve_linearized_gap_equation(.) λ_max, gap vector, arc-length weights, λ_JT_kernel, gap symmetry
+    ├── solve_linearized_gap_equation(., g_t) λ_max, gap vector, arc-length weights, λ_JT_kernel, gap symmetry
     ├── compute_G_instability(δ, M,
     │       compute_dlambda=True)        G3 matrix, ∂λ_pair/∂Q, Tc estimate,
     │                                    PSD projection at q=0, χ_SQ(q) BZ scan (D₂h only)
@@ -638,7 +651,7 @@ The k-grid (endpoint=False) is constructed so that for any `q = (nx, ny) · 2π/
 E_kQ_all = E_k_all[shift_table[nx, ny]]   # no LAPACK, just index reorder
 ```
 
-For the static AFM susceptibility χ_DD_s, the computation is performed at q=0 in the folded basis: `E_kQ_all = E_k_all` and `V_kQ_all = V_k_all` — no permutation needed, since the sublattice stagger in `sz_bdg16` already selects the (π,π) channel. The solver-level `_get_chi0_norm_cache` additionally caches the Δ=0 eigenvectors across calls with the same `(M, Q, mu, tx, ty, g_J, target_doping)` within tolerance `_CHI0_CACHE_TOL = 1e-5`.
+For the static AFM susceptibility χ_DD_s, the computation is performed at q=0 in the folded basis: `E_kQ_all = E_k_all` and `V_kQ_all = V_k_all` — no permutation needed, since the sublattice stagger in `sz_bdg16` already selects the (π,π) channel. The solver-level `_get_chi0_norm_cache` additionally caches the Δ=0 eigenvectors across calls with the same `(M, Q, mu, tx, ty, g_J, target_doping)` within tolerance `_CHI0_CACHE_TOL = 1e-5`. The FS precomputation (`_fs_precomputed`) is similarly keyed without Δ: the FS locus and Fermi velocities are evaluated at Δ=0, making the cache Δ-independent and consistent with the BCS/BdG convention that the pairing kernel is built from the normal-state Fermi surface.
 
 ### Dual k-Grid Setup
 
@@ -676,9 +689,9 @@ The RPA pairing vertex is rebuilt when any of the following thresholds are excee
 | Q | absolute > 3% of λ_hop | `_Q_THR_REL` |
 | j_renorm | absolute > 0.05 | — |
 | doping | absolute > 0.005 | — |
-| `chi_QQ_from_normal` flag | False (cache not built from Δ=0) | — |
+| `chi_QQ_from_normal` flag | False (cache not built from Δ=0) | triggers unconditional rebuild |
 
-The vertex is always built from the normal state (Δ=0): there is no Δ-threshold invalidation. `chi_QQ_bare_v` is evaluated in the SC state (Δ≠0) for the lattice stability branch; the pairing vertex inputs are always from the normal state. The cache additionally stores `det_afm`, `chi_DD_s_full`, and `chi_DD_s_moriya_full` from the AFM susceptibility evaluated at q=(π,π).
+The vertex is always built from the normal state (Δ=0): there is no Δ-threshold invalidation. `chi_QQ_bare` is passed to `get_susceptibilities_normal` as the normal-state orbital bubble; `chi_QQ` for the G-matrix is evaluated in the SC state (Δ≠0) for the lattice stability branch; the pairing vertex inputs are always from the normal state. The cache stores `det_afm`, `det_q0`, `chi_DD_s_afm` (Moriya-damped χ_DD_s at q=(π,π)), `V_s_scalar`, `V_d_scalar`, `ansatz_unstable` (det_afm < 0), `Gamma_M_eff`, and FS geometry arrays `fs_pts`, `vF_arr`, `phi_d`.
 
 ### Limit-Cycle Detection
 
@@ -703,7 +716,7 @@ After convergence: post-convergence Hessian test (3×3 `∂²F/∂{M,Q,Δ}²` wi
 
 **Incommensurate AFM auto-retry:** after convergence a scan over `q = (π, π−δq)` with δq ∈ [0, 0.15π] checks whether the AFM susceptibility χ_DD_s peaks away from (π,π). If `δq_max > 0.05π`, `solve_self_consistent` automatically re-runs with a softened AFM seed (`M → 0.85M`) via a single recursive call guarded by the `_ic_retry` flag.
 
-The result dict includes: all converged order parameters, Hessian eigenvalues, G3-matrix diagnostics, λ_JT, λ_JT_sc, λ_JT_kernel, ∂λ_pair/∂Q, gap symmetry, channel decomposition, coherence length ξ/a, 2Δ₀/kTc, `chi_tau_sc`, `chi_tau_n`, `delta_chi_tau`, `richardson_ok`, `selection_ratio`, `chi_DD_s`, `chi_DD_s_moriya`, `chi_DD_s_full`, `chi_DD_s_moriya_full`, `rpa_factor`, `afm_unstable`, `j_renorm`, `incommensurate_dq`, `incommensurate_chi_ratio`.
+The result dict includes: all converged order parameters, Hessian eigenvalues, G3-matrix diagnostics, λ_JT, λ_JT_sc, λ_JT_kernel, ∂λ_pair/∂Q, gap symmetry, channel decomposition, coherence length ξ/a, 2Δ₀/kTc, `chi_tau_sc`, `chi_tau_n`, `richardson_ok`, `selection_ratio`, `chi_DD_s` (Moriya-damped, at q=(π,π)), `chi_DQ_s`, `chi_QQ`, `rpa_factor`, `afm_unstable`, `ansatz_unstable`, `j_renorm`, `g_t`, `g_J`, `tx`, `ty`, `K_eff_scf`, `scf_dynamics_regime`, `mott_suspect`, `incommensurate_dq`, `incommensurate_chi_ratio`.
 
 ### Unified Bayesian Optimisation (5D)
 
@@ -721,14 +734,14 @@ The result dict includes: all converged order parameters, Hessian eigenvalues, G
 
 **Hard constraints (H1–H4):** score = 0, excluded from GP training set:
 - H1: `∂²F/∂Q²|_{Δ=0} > 0` — normal-state Q-stability (no spontaneous JT)
-- H2: `J_eff · χ_DD_s(Moriya) < 1` — below Stoner QCP (uses Moriya-damped susceptibility; falls back to SC-state gapped χ if past QCP, capped at 0.98)
+- H2: `J_eff · χ_DD_s < 1` — below Stoner QCP (χ_DD_s is always Moriya-damped; falls back to SC-state gapped χ if past QCP, capped at 0.98)
 - H3: `G22 > 0` — JT channel not self-crossing in normal state
 - H4: `g_t ≥ 0.10` — coherent Fermi surface (Mott guard)
 
 **Soft constraints / DE penalty (S1–S5, weights sum to 1.0):**
-- S1 (w=0.225): `0 < λ_min(G3) < 0.15` — near-critical, not past QCP
-- S2 (w=0.225): monotonic reward for larger λ_max; only penalises near-divergence (λ_max > 0.95) and unsolvable cases — small λ_max in the normal state is not penalised, consistent with first-order transition hypothesis
-- S3 (w=0.180): `λ_JT > 0.05` — SC-JT coupling above threshold
+- S1 (w=0.225): `0 < λ_min(G3) < _DE_LAMBDA_MIN_OPT` (0.15) — near-critical, not past QCP
+- S2 (w=0.225): monotonic reward for larger λ_max; only penalises near-divergence (λ_max > `_DE_LAMBDA_MAX_REWARD` = 4.0) and unsolvable cases — small λ_max in the normal state is not penalised, consistent with first-order transition hypothesis
+- S3 (w=0.180): `λ_JT > _DE_LAMBDA_JT_THRESH` (0.05) — SC-JT coupling above threshold
 - S4 (w=0.270): `∂λ_pair/∂Q > 0` — JT renormalises V_pair upward
 - S5 (w=0.100): G22-margin > `_DE_G22M_SAFE = 0.25` — distance from the spontaneous-JT boundary; `S5 = 1 − tanh(G22 / _DE_G22M_SAFE)` continuously penalises proximity to G22 = 0
 
@@ -767,6 +780,26 @@ All energies in **eV**, lengths in **Å**.
 | `tol` | — | 1e-4 | Convergence threshold |
 | `Z` | Z | 4 | Coordination number |
 
+### Module-level Physical Constants
+
+Fixed unit-conversion and empirical values extracted to named constants:
+
+| Constant | Value | Description |
+|---|---|---|
+| `_KB_EV` | 8.617333×10⁻⁵ eV/K | Boltzmann constant |
+| `_EV_TO_K` | 11604.518 K/eV | 1 eV in Kelvin |
+| `_BCS_TC_PREFACTOR` | 1.13 | BCS weak-coupling Tc = 1.13·ω_c·exp(−1/λ) |
+| `_BCS_RATIO_STRONG` | 3.8 | 2Δ/kTc threshold: strong coupling |
+| `_BCS_RATIO_VSTRONG` | 5.0 | 2Δ/kTc threshold: very-strong coupling |
+| `_BCS_RATIO_EXOTIC` | 7.0 | 2Δ/kTc threshold: exotic / non-phononic |
+| `_M0_STONER_AMP` | 0.18 | Stoner amplitude in `estimate_M0` |
+| `_M0_DELTA_C` | 0.23 | Critical doping above which Stoner M→0 linearly |
+| `_M0_PRIOR_SLOPE` | 0.40 | Slope of M_prior vs. doping |
+| `_M0_PRIOR_REF` | 0.06 | Reference doping for M_prior (AFM dome optimum) |
+| `_M0_W_DOPING_SAT` | 0.20 | Doping scale at which blend weight w→1 |
+| `_BO_ARCH_DENOM` | 0.2025 | Parabolic arch denominator; peak at λ_JT=0.45 |
+| `_RPA_BW_FACTOR` | 8.0 | Bandwidth = 8t for 2D square-lattice tight-binding |
+
 ### Module-level SCF Constants
 
 These are fixed at compile time and not Bayesian-optimised:
@@ -793,8 +826,19 @@ These are fixed at compile time and not Bayesian-optimised:
 | `_CYCLE_WINDOW` | 20 | Iteration window for limit-cycle detection |
 | `_CYCLE_THRESHOLD` | 0.30 | std/mean of |Δ| above this → oscillatory regime |
 | `_CYCLE_DAMP_FAC` | 0.50 | α reduction factor on oscillation detection |
+| `_VF_FLOOR` | 1e-4 | Fermi velocity floor; prevents 1/|vF|→∞ at hot spots (~0.01·t0·a/ħ); used in FS sampling weight |
+| `_VF_FLOOR_TIGHT` | `_VF_FLOOR × 1e-4` = 1e-8 | Tighter floor for `dl/vF` arc-length weight; must be ≪ `_VF_FLOOR` |
+| `_RPA_V_CAP_ALPHA` | 2.5 | V_cap = α·max(`_RPA_BW_FACTOR`·max(|tx|,|ty|), J_eff); 2.5× headroom above BEC-BCS crossover |
+| `_DELTA_ABS_FLOOR` | 0.001 eV | |Δ| below this → jump limiter bypassed (seed-gap free-growth phase; ~0.7–2% of t0) |
+| `_DQ_FS_VERTEX` | 0.02 Å | Finite-difference step for ∂V(k,k')/∂Q on FS (≈2–4% of λ_hop) |
 | `_G_T_COHERENCE_MIN` | 0.10 | g_t floor for coherent ZRS band (Mott guard) |
 | `_BO_MAX_WORKERS` | 6 | ThreadPoolExecutor worker ceiling |
+| `_FEASIBILITY_THRESHOLD` | 0.25 | Partial penalty ≥ this → infeasible regardless of S4 |
+| `_DE_LAMBDA_MAX_REWARD` | 4.0 | λ_max above this → penalised (past QCP / numerically unstable) |
+| `_DE_LAMBDA_MIN_OPT` | 0.15 | λ_max below this → weak pairing (S2 sigmoid centre) |
+| `_DE_LAMBDA_JT_THRESH` | 0.05 | λ_JT below this → SC-JT window closed (S3 penalty threshold) |
+| `_TR_SHRINK` | 0.65 | TuRBO trust-region: shrink ×0.65 on failure |
+| `_TR_EXPAND` | 1.35 | TuRBO trust-region: expand ×1.35 on consecutive improvement |
 
 ### Derived Parameters (from `__post_init__`)
 
@@ -862,10 +906,10 @@ On startup:
 4. `compute_G_instability()` at self-consistent M + `check_sc_jt_window()` with χ_τ_sc from post-SCF.
 5. Linearized gap equation and channel decomposition from SCF result dict.
 6. Preliminary Tc₁/Tc₂ log block (G-BCS analytic and λ_max-BCS with JT phonon cutoff).
-7. If `need_optimalization = True`: `UnifiedBayesianOptimizer.optimize()` — DE scout → GP seed → TuRBO → local refine.
+7. If `need_optimization = True`: `UnifiedBayesianOptimizer.optimize()` — DE scout → GP seed → TuRBO → local refine.
 8. Post-SCF: Hessian, coherence length, `compute_Tc_thermodynamic`, `compute_lambda_vs_T`, gap ratio, phase-diagram scan.
 
-The flag `need_optimalization` (default `False`) controls whether the Bayesian optimisation pipeline runs.
+The flag `need_optimization` (default `False`) controls whether the Bayesian optimisation pipeline runs.
 
 ---
 
