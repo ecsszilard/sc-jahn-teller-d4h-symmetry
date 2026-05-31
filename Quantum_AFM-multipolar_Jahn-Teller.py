@@ -63,7 +63,16 @@ _RPA_QCP_PENALTY      : float = 0.30                # α reduction per unit |det
 _BZ_NORM              : float = (2.0 * np.pi) ** 2  # BZ area in reduced coordinates (a=1, ħ=1): area = (2π)², FS arc-length integration measure is dl/((2π)²·vF)
 _DET_AFM_FLOOR        : float = 1.0                 # default det_afm when vertex cache is absent (normal state, no QCP)
 _DET_AFM_QCP_FLOOR    : float = 0.02                # below this |det_afm| the system is at/past the AFM QCP; used in adaptive M-staleness and saddle-point LM
-_DET_MARGINAL_FLOOR   : float = 0.05                # below this |det_afm|, the model allows EMA smoothing, because the sign is burdened with numerical uncertainty due to the proximity of the QCP
+_DET_SIGN_FLIP_SCALE  : float = 0.05                # |det_afm| scale for V_d sign-flip EMA suppression (determines the sigmoid midpoint)
+_EMA_SIGN_FLIP_W_MIN  : float = 0.20                # minimum w_factor on V_d sign flip; preserves adaptation even at det≈0
+_EMA_SIGN_FLIP_SLOPE  : float = 6.0                 # sigmoid steepness in sign-flip EMA: w=w_min+(1-w_min)/[1+exp(-k·(|det|/floor-0.5))]
+_VMAT_LOW_VAR_FRAC    : float = 0.10                # std(V)/|mean(V)| < this → vertex low-variance flag
+_V_PREV_SIGN_FLOOR    : float = 1e-6                # |V_d_prev| below this → treat as zero, skip sign-flip check
+_V_AFM_Q_MIN          : float = 0.70                # |q|/π > this → counted as AFM region in vertex diagnostics
+_V_FWD_Q_MAX          : float = 0.35                # |q|/π < this → counted as forward-scattering region
+_DET_DEPTH_CAP        : float = 5.0                 # max det_depth in jump-cap exponential suppression
+_DET_JUMP_HALF_SCALE  : float = 0.5                 # exp(−this·det_depth) decay rate for gap jump cap past QCP
+_JUMP_CAP_FLOOR       : float = 1.05                # minimum effective_jump_cap (prevents total freeze past QCP)
 _CHI_DQ_FLOOR         : float = 1e-12               # amplitude floor for chi_DQ in Padé width and dynamic floor
 _CHI_DQ_S_PADE_W      : float = 0.05                # Padé width w for χ_SQ regularisation: χ_SQ_v=χ_SQ/(1+|χ_SQ|/w); linear at |χ_SQ|≪w, saturates to ±w
 _CHI_DQ_FLOOR_FRAC    : float = 1e-4                # dynamic floor factor calculated from geometric mean
@@ -2586,6 +2595,7 @@ class RMFT_Solver:
         _delta_run_hist: list = []
         _scf_dynamics_regime: str = 'converging'   # updated by _classify_scf_dynamics
         _ansatz_unstable_ever: bool = False        # True if det<0 was seen at any iteration
+        _V_d_ema_state: float | None = None        # persistent V_d history for sign-flip EMA; survives vertex_cache=None resets
 
         for iteration in range(_MAX_ITER):
             _iter_t0 = _time.time()
@@ -2983,8 +2993,9 @@ class RMFT_Solver:
                     if _vertex_cache.get('vmat_same_sign', False):
                         _vmat_flags += " ⚠same-sign"
 
-                # q-resolved vertex flags: appended to log only when V_d < 0 to keep normal output compact.
-                # V_afm > 0 + V_dd_fs < 0: form-factor sign cancellation; V_afm < 0: globally repulsive (unphysical).
+                # q-resolved vertex flags: appended only when V_d < 0 to keep normal output compact.
+                # V_afm > 0 + V_dd_fs < 0: form-factor sign cancellation (d-wave geometry issue).
+                # V_afm < 0: globally repulsive spin channel (unphysical, cross-term dominates).
                 if _V_d_now < 0.0 and _vertex_cache is not None:
                     _v_afm = _vertex_cache.get('V_afm_mean', float('nan'))
                     _v_fwd = _vertex_cache.get('V_fwd_mean', float('nan'))
@@ -4949,28 +4960,32 @@ class VectorizedBdG:
                 V_d_scalar = float(np.dot(phi_d_w, V_d_proj)) / phi_d_norm
                 V_d_scalar = float(np.clip(V_d_scalar, -_V_cap, _V_cap))
 
-                # Prevent cache-rebuild sign flips caused by tiny QCP boundary crossings.
-                _V_d_prev = float(_vertex_cache.get('V_d_scalar', V_d_scalar)) if _vc_is_dict else V_d_scalar
-                _det_is_marginal = abs(_det_afm) < _DET_MARGINAL_FLOOR
-                _sign_flipped    = (V_d_scalar * _V_d_prev < 0.0) and (abs(_V_d_prev) > 1e-6)
-                if _det_is_marginal and _sign_flipped:
-                    V_d_scalar = (1-_EMA_NEW_WEIGHT) * _V_d_prev + _EMA_NEW_WEIGHT * V_d_scalar
+                # Sign-flip guard: SCF-scale changes in M/Q cannot physically reverse V_d sign.
+                _sign_flipped = (_V_d_ema_state is not None
+                                 and V_d_scalar * _V_d_ema_state < 0.0
+                                 and abs(_V_d_ema_state) > _V_PREV_SIGN_FLOOR)
+                if _sign_flipped:
+                    _det_x  = abs(_det_afm) / _DET_SIGN_FLIP_SCALE
+                    _w_factor = _EMA_SIGN_FLIP_W_MIN + (1.0 - _EMA_SIGN_FLIP_W_MIN) / (
+                        1.0 + math.exp(-_EMA_SIGN_FLIP_SLOPE * (_det_x - 0.5)))
+                    _ema_w     = _EMA_NEW_WEIGHT * _w_factor
+                    V_d_scalar = (1.0 - _ema_w) * _V_d_ema_state + _ema_w * V_d_scalar
+                _V_d_ema_state = V_d_scalar   # always update with corrected value
 
                 # V_full_mat structure flags for SCF log
                 V_flat          = V_full_mat[iu, ju]
-                _vmat_low_var   = float(np.std(V_flat)) < 0.10 * abs(float(np.mean(V_flat))) + 1e-12
+                _vmat_low_var   = float(np.std(V_flat)) < _VMAT_LOW_VAR_FRAC * abs(float(np.mean(V_flat))) + 1e-12
                 _vmat_same_sign = (float(np.min(V_flat)) > 0.0) or (float(np.max(V_flat)) < 0.0)
 
-                # q-resolved vertex diagnostics (stored in cache, logged only when V_d < 0).
-                # Healthy d-wave: V_afm > 0 (spin-fluct peak attractive), V_fwd < 0 (forward repulsive, cancelled by φ_d).
-                # Pathological: V_afm < 0 → globally repulsive spin channel; V_neg_frac > 0.9 → JT cross-term carries all pairing.
+                # q-resolved vertex diagnostics (logged only when V_d < 0).
+                # Healthy: V_afm > 0 (AFM peak attractive), V_fwd < 0 (forward repulsive, cancelled by φ_d).
                 _q_norms_vc   = np.linalg.norm(u_q_vecs, axis=1)
-                _afm_mask_vc  = _q_norms_vc > np.pi * 0.7
-                _fwd_mask_vc  = _q_norms_vc < np.pi * 0.35
+                _afm_mask_vc  = _q_norms_vc > np.pi * _V_AFM_Q_MIN
+                _fwd_mask_vc  = _q_norms_vc < np.pi * _V_FWD_Q_MAX
                 _V_afm_mean   = float(np.mean(V_unique[_afm_mask_vc])) if _afm_mask_vc.any() else float('nan')
                 _V_fwd_mean   = float(np.mean(V_unique[_fwd_mask_vc])) if _fwd_mask_vc.any() else float('nan')
                 _V_neg_frac   = float(np.mean(V_unique < 0.0))
-                # FS-projected d-wave vertex: sign determines whether d-wave is supported.
+                # FS-projected d-wave vertex: sign determines whether d-wave is actually supported.
                 _phi_d_w_vc   = phi_d * _w_vF
                 _nd_vc        = max(float(np.dot(_phi_d_w_vc, _phi_d_w_vc)), 1e-12)
                 _V_dd_fs      = float(_phi_d_w_vc @ V_full_mat @ _phi_d_w_vc) / _nd_vc
@@ -5002,10 +5017,10 @@ class VectorizedBdG:
                 'vmat_same_sign': _vmat_same_sign,
                 'Gamma_M_eff': _Gamma_M_eff,
                 'chi_DQ_sc_pipi': _chi_DQ_sc_pipi,
-                'V_afm_mean': _V_afm_mean,   # mean V at |q|>0.7π: >0 expected for AFM spin-fluct pairing
-                'V_fwd_mean': _V_fwd_mean,   # mean V at |q|<0.35π: typically <0 (forward repulsion, normal)
-                'V_neg_frac': _V_neg_frac,   # fraction of q with V<0: >0.9 → globally repulsive, unphysical
-                'V_dd_fs':    _V_dd_fs,      # FS-projected d-wave vertex: negative → d-wave not supported
+                'V_afm_mean': _V_afm_mean,   # mean V(q) at |q|>_V_AFM_Q_MIN·π (AFM region)
+                'V_fwd_mean': _V_fwd_mean,   # mean V(q) at |q|<_V_FWD_Q_MAX·π (forward region)
+                'V_neg_frac': _V_neg_frac,   # fraction q with V<0; >0.9 → globally repulsive
+                'V_dd_fs':    _V_dd_fs,      # FS-projected d-wave vertex; <0 → d-wave unsupported
             }
 
         # Rayleigh-quotient λ_pair proxy: _{ij} = V(k_i−k_j) / √(|vF_i|·|vF_j|) is the linearised gap kernel. Rayleigh quotient with trial vector φ gives: λ ≈ <φ|Γ|φ>/<φ|φ> ≈ V_scalar · <φ²·(1/|vF|)>/<φ²> = V_scalar · N_eff
@@ -5034,11 +5049,11 @@ class VectorizedBdG:
         _D_old_total = abs(Delta_s) + abs(Delta_d)
         _D_new_total = Delta_s_raw + Delta_d_raw
 
-        # Det-proportional jump cap: for det_afm < 0, the RPA regime is unreliable, unlike the SCF α-penalty, this directly limits the gap step.
+        # Det-proportional jump cap: past the QCP the RPA vertex is unreliable; limit the gap step.
         _det_afm_now = float(_vertex_cache.get('det_afm', 1.0))
         if _det_afm_now < 0.0:
-            _det_depth = float(np.clip(abs(_det_afm_now) / max(_RPA_DET_WARN, 1e-6), 0.0, 5.0))
-            effective_jump_cap = max(1.05, _DELTA_JUMP_CAP * math.exp(-0.5 * _det_depth))
+            _det_depth = float(np.clip(abs(_det_afm_now) / max(_RPA_DET_WARN, 1e-6), 0.0, _DET_DEPTH_CAP))
+            effective_jump_cap = max(_JUMP_CAP_FLOOR, _DELTA_JUMP_CAP * math.exp(-_DET_JUMP_HALF_SCALE * _det_depth))
         else:
             effective_jump_cap = _DELTA_JUMP_CAP
 
@@ -6100,14 +6115,14 @@ if __name__ == "__main__":
     """, flush=True)
 
     params = ModelParams(
-        t_pd         = 0.460,
-        u            = 30.000,
-        lambda_soc   = 0.180,
-        Delta_tetra  = -0.140,
+        t_pd         = 0.470,
+        u            = 28.000,
+        lambda_soc   = 0.160,
+        Delta_tetra  = -0.100,
         g_JT         = 0.160,
-        K_lattice    = 0.900,
+        K_lattice    = 1.200,
         lambda_hop   = 1.100,
-        Delta_CT     = 2.100,
+        Delta_CT     = 2.000,
         omega_JT     = 0.057,
         Delta_inplane= 0.010,
         Z            = 4,
@@ -6115,7 +6130,7 @@ if __name__ == "__main__":
         tol          = 1e-4,
         )
 
-    target_doping  = 0.45
+    target_doping  = 0.50
     doping_margin  = 0.20          # scan covers target ± 20 %
     min_doping     = max(target_doping * (1.0 - doping_margin), _G_T_COHERENCE_MIN / (2.0 - _G_T_COHERENCE_MIN))
     max_doping     = target_doping * (1.0 + doping_margin)
