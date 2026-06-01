@@ -28,11 +28,16 @@ _log_lock = _threading.Lock()
 _KB_EV                : float = 8.617333e-5         # Boltzmann constant [eV/K]; 1 eV = 11604.518 K
 _EV_TO_K              : float = 1.0 / _KB_EV        # 1 eV in Kelvin (= 11604.518...)
 
-# ── BCS / Tc diagnostics ──────────────────────────────────────────────────────
-_BCS_TC_PREFACTOR     : float = 1.13                # BCS weak-coupling Tc = 1.13·ω_c·exp(−1/λ)
+# ── Tc diagnostics ────────────────────────────────────────────────────────────
 _BCS_RATIO_STRONG     : float = 3.8                 # 2Δ/kTc > this → strong coupling
 _BCS_RATIO_VSTRONG    : float = 5.0                 # 2Δ/kTc > this → very-strong coupling
 _BCS_RATIO_EXOTIC     : float = 7.0                 # 2Δ/kTc > this → exotic / non-phononic
+_MAD_DENOM            : float = 1.20                # denominator in McMillan formula  Tc = ω/(denom)·exp(…)
+_MAD_NUM              : float = 1.04                # numerator coefficient:           exp(-num·(1+λ)/λ)
+_GL_MIN_PTS           : int   = 2                   # minimum stable SC points required for GL fit
+_GL_MAX_PTS           : int   = 4                   # upper window of recent stable points used in GL regression
+_GL_DELTA_MIN         : float = 2e-3                # |Δ| floor for GL fit points (below this: numerically unreliable)
+_GL_TC_MARGIN         : float = 0.05                # max relative deviation |Tc_GL−T_spinodal|/T_max to accept GL result
 
 # ── k-grid and cluster ────────────────────────────────────────────────────────
 _NK                   : int   = 64                  # k-grid points per direction (even required for commensurate q_AFM=(π,π))
@@ -84,7 +89,7 @@ _Q_FM_CLIP_MIN        : float = 0.05                # minimum FM damping moment 
 _Q_FM_CLIP_MAX        : float = 0.50                # maximum FM damping moment extent 
 
 # ── JT / SC-triggered Jahn–Teller ────────────────────────────────────────────
-_LAMBDA_JT_VIABLE     : float = 0.05                # Minimum λ_JT = g²·χ_τ/K for SC-triggered JT viability (sets K_SC upper bound).
+_LAMBDA_JT_VIABLE     : float = 0.05                # Minimum λ_JT_sc = g²·|χ_τ_sc|/K_eff for SC-triggered JT viability. Sets upper K_SC = g²·|χ_τ_sc|/0.05 bound on K_lattice in check_sc_jt_window.
 _JT_ACT_THR           : float = 0.04                # The threshold of Γ₆–Γ₇ mixing induced by SC condensate
 _DQ_FS_VERTEX         : float = 0.02                # Å — finite-difference step for ∂V(k,k')/∂Q on FS (SC-triggered JT sensitivity ∂λ/∂Q); Physical scale: lambda_hop (typ. 0.5–1.0 Å); 0.02 Å ≈ 2–4% of lambda_hop.
 _K_EFF_M_THR          : float = 0.02                # |ΔM| threshold to trigger K_eff rigidity recompute
@@ -176,7 +181,7 @@ _DE_G22M_SAFE         : float = 0.25                # G22 value considered safel
 _FEASIBILITY_THRESHOLD: float = 0.25                # penalty >= this → infeasible regardless of S4
 _DE_LAMBDA_MAX_REWARD : float = 4.0                 # λ_max above this → penalised (numerically unstable / past QCP)
 _DE_LAMBDA_MIN_OPT    : float = 0.15                # λ_max below this → weak pairing (S2 sigmoid centre)
-_DE_LAMBDA_JT_THRESH  : float = 0.05                # λ_JT below this → penalised (SC-JT window closed)
+_DE_LAMBDA_JT_THRESH  : float = 0.05                # Normal-state lam_JT = g²·χ_QQ/K_bare below this → S3 penalised (SC-JT window closed)
 
 # Nambu sector pairs for normal-state (Δ=0) Lindhard sum. Excludes anomalous Part↔Hole pairs, which vanish at Δ=0.
 _NORMAL_SECTOR_PAIRS  : tuple = (
@@ -233,8 +238,6 @@ class ModelParams:
                               #       Δ_ip=0 (D₄h): B1g_op purely anti-diagonal → SC-triggered JT only.
                               #       Δ_ip≠0 (D₂h): adds spin-preserving and diagonal B1g elements, partially activating JT without SC.
     Delta_CT:      float      # eV    charge-transfer gap (ZSA scale); sets scale for CT-insulator crossover
-    omega_JT:      float      # eV    JT phonon frequency (40–80 meV); enters only D_phonon = 2/ω_JT
-                              #       All free-energy magnitudes use adiabatic g²/K
 
     # --- Numerics ---
     Z:             int        # 2D square lattice coordination number
@@ -569,6 +572,13 @@ def _lindhard_bubble(sector_pairs: tuple, E_k_all: np.ndarray, V_k_all: np.ndarr
                 optimize='greedy')
     return 0.25 * (chi + chi.conj().T)   # 0.25 = 0.5 (Nambu particle-hole doubling) × 0.5 (hermitisation of chi[a,b]↔chi[b,a]).
 
+@dataclass
+class _SolveState:
+    """
+    Mutable SCF-run-local state passed explicitly into compute_gap_eq_vectorized.
+    """
+    V_d_ema: Optional[float] = None   # sign-flip EMA state for V_d_scalar
+
 class RMFT_Solver:
 
     def __init__(self, params: ModelParams):
@@ -597,7 +607,7 @@ class RMFT_Solver:
                  f"   Δ_tetra={params.Delta_tetra:.3f} eV  g_JT={params.g_JT:.3f} eV"
                  f"   K_lattice={params.K_lattice:.3f} eV/Å²  K_spont={K_spont:.3f} eV/Å²"
                  f"  {'✓ K_lattice > K_spont, SC-JT window possible' if params.K_lattice > K_spont else '⚠ spontaneous JT risk'}"
-                 f"  lambda_hop={params.lambda_hop:.3f}  Δ_CT={params.Delta_CT:.3f} eV   ω_JT={params.omega_JT:.3f} eV   Δ_ip={params.Delta_inplane:.3f} eV"
+                 f"  lambda_hop={params.lambda_hop:.3f}  Δ_CT={params.Delta_CT:.3f} eV   Δ_ip={params.Delta_inplane:.3f} eV"
                  f"  kT={self.kT*1000:.2f} meV  Z={params.Z}  N_k={self.N_k}")
         _scf_log("RMFT-DERIVED",
                  f"t0={params.t0:.4f} eV  U={params.U:.4f} eV  "
@@ -986,29 +996,47 @@ class RMFT_Solver:
             nonlinear = abs(cd1 - cd2) / max(abs(cd2), 1e-12) > 0.2
             
             if converged:
-                return est, True, nonlinear
-            elif not nonlinear:
-                return cd1, False, nonlinear
-            else:
-                # Highly non-linear response: fall back to the smallest step that isn't R2 to localize the response.
-                return cd2, False, True
+                return est, True, False, 1.0
+
+            if not nonlinear:
+                return cd1, False, False, 1.0
+
+            # Nonlinear branch: try one more refinement level
+            cd4 = _cd(h / 8.0, ds, dd)
+            nonlinear2 = abs(cd3 - cd4) / max(abs(cd4), 1e-12) > 0.2
+
+            if not nonlinear2:
+                return cd4, False, True, 0.5
+
+            # Both scales nonlinear → derivative unresolvable at this Q
+            return 0.0, False, True, 0.0
 
         # SC-state χ_τ
-        dB1g_sc, ok_sc, nonlin_sc = _richardson(Delta_s, Delta_d)
+        dB1g_sc, ok_sc, nonlin_sc, w_sc = _richardson(Delta_s, Delta_d)
 
         # Normal-state baseline: MUST evaluate even when Δ is small, because in D₂h symmetry the normal state has a non-zero B₁g response that must be subtracted.
-        dB1g_n, ok_n, nonlin_n = _richardson(0.0+0j, 0.0+0j)
+        dB1g_n,  ok_n,  nonlin_n,  w_n  = _richardson(0.0+0j, 0.0+0j)
 
         # ── Reliability guard ──────────────────────────────────────────────────────
-        if nonlin_sc:
-            chi_tau_sc = 0.0   # unreliable derivative — treat as zero (conservative)
+        if w_sc == 0.0:
+            chi_tau_sc = 0.0  # fully unresolvable (both scales nonlinear): use zero
         else:
-            chi_tau_sc = dB1g_sc / g_JT   # sign physical: negative=stiffening
+            chi_tau_sc = w_sc * dB1g_sc / g_JT   # sign physical: negative = stiffening
 
-        if nonlin_n:
-            chi_tau_n = 0.0    # unreliable baseline — skip subtraction
+        if w_n == 0.0:
+            chi_tau_n = 0.0   # unreliable baseline — skip subtraction
         else:
-            chi_tau_n = dB1g_n / g_JT
+            chi_tau_n = w_n * dB1g_n / g_JT
+
+        if nonlin_sc and w_sc > 0.0:
+            _scf_log("CHI-TAU",
+                     f"  ⚠ χ_τ nonlinear at Q={Q:+.5f} Å — finer-scale estimate used"
+                     f"  (weight={w_sc:.1f}, value={chi_tau_sc:+.5f} eV⁻¹)."
+                     f"  Near first-order SC-JT boundary; feedback halved.")
+        elif nonlin_sc:
+            _scf_log("CHI-TAU",
+                     f"  ⚠ χ_τ unresolvable at Q={Q:+.5f} Å — zero used."
+                     f"  Both Richardson scales nonlinear; SCF feedback suppressed.")
 
         richardson_ok = ok_sc and ok_n and not nonlin_sc and not nonlin_n
         return {
@@ -1017,6 +1045,7 @@ class RMFT_Solver:
             'richardson_ok': richardson_ok,
             'nonlin_sc':     nonlin_sc,
             'nonlin_n':      nonlin_n,
+            'chi_tau_weight': w_sc,   # 1.0=full, 0.5=halved, 0.0=suppressed
             'N0':            N0,
             'Ut_ratio':      Ut_ratio,
         }
@@ -2499,9 +2528,12 @@ class RMFT_Solver:
              is mixed in with weight _ALPHA_MIX_2X2, preventing artificial channel locking.
           5. Cluster ED → j_renorm (EMA-smoothed) for Moriya boost.
           6. Newton step for M (LM-damped, trust-region); blend with BdG fixpoint.
-          7. Hierarchical SCF: Q updates only every
-             _Q_UPDATE_PERIOD iterations via Hellmann-Feynman; intervening iterations
-             converge (Δ,M,μ) at frozen Q, consistent with adiabatic lattice timescale.
+          7. Adaptive Q update via Hellmann-Feynman: Q_out_raw = −(g_JT/K_eff)·⟨B₁g⟩
+             Injected into the Anderson vector when |Q_out_raw − Q| > _Q_THR_REL·λ_hop,
+             OR on iteration 0, OR every _Q_UPDATE_PERIOD iterations (safety heartbeat).
+             When not injected, Q_out = Q (Anderson residual zero → mixer leaves Q untouched),
+             consistent with the adiabatic lattice timescale. α is capped at _MIXING×0.3 when
+             a genuine Q displacement is injected.
           8. Anderson(5) mix (M, Q, |Δ_s|, |Δ_d|); find μ enforcing density.
           9. Adaptive α via Λ_inst = EMA[max(λ_pair, λ_JT, J·χ_SS)]:
              α_eff = α₀/(1+Λ); halved + history reset on divergence;
@@ -2589,13 +2621,11 @@ class RMFT_Solver:
         _near_fm_qcp  = False
         _near_afm_qcp = False
         _tol_use      = self.p.tol
-        _Q_iter_counter = 0      # counts iterations since last Q update
-        _Q_frozen       = False  # True during inner sub-iterations (Q held fixed)
         selection_ratio = 0.0
         _delta_run_hist: list = []
-        _scf_dynamics_regime: str = 'converging'   # updated by _classify_scf_dynamics
-        _ansatz_unstable_ever: bool = False        # True if det<0 was seen at any iteration
-        _V_d_ema_state: float | None = None        # persistent V_d history for sign-flip EMA; survives vertex_cache=None resets
+        _scf_dynamics_regime: str = 'converging'
+        _ansatz_unstable_ever: bool = False
+        _solve_state = _SolveState()
 
         for iteration in range(_MAX_ITER):
             _iter_t0 = _time.time()
@@ -2651,7 +2681,7 @@ class RMFT_Solver:
 
             # Gap equation: V(q) always from Δ=0 χ₀; BdG amplitudes (u,v) from SC state.
             Delta_s_out, Delta_d_out, _vertex_cache = _vbdg.compute_gap_eq_vectorized(
-                M, Q, Delta_s, Delta_d, target_doping, mu, tx, ty, g_J, g_t, _K_eff_scf, g_Delta_s, g_Delta_d, _j_renorm_cur,
+                M, Q, Delta_s, Delta_d, target_doping, mu, tx, ty, g_J, g_t, _K_eff_scf, g_Delta_s, g_Delta_d, _j_renorm_cur, _solve_state,
                 _bdg_cache=(_bdg_ev_sc, _bdg_ec_sc), _vertex_cache=_vertex_cache)
 
             # 2×2 kernel K_pair captures s/d channel coupling; dominant eigenvector gives optimal Δ_s/Δ_d ratio.
@@ -2713,17 +2743,18 @@ class RMFT_Solver:
             Delta_s_out = complex(_Ds)
             Delta_d_out = complex(_Dd)
 
-            # Q updates only every _Q_UPDATE_PERIOD inner iterations: Q is the adiabatic (slow) variable; electrons converge much faster.
-            # This prevents over-correlation between Q and Δ and avoids the numerical oscillation that arises from updating both simultaneously at each step.
-            _Q_iter_counter += 1
-            _q_update_now = (_Q_iter_counter >= _Q_UPDATE_PERIOD) or (iteration == 0)
-            if _q_update_now:
-                Q_out = -(self.p.g_JT / max(_K_eff_scf, 1e-9)) * B1g_exp
-                Q_out = float(np.clip(Q_out, -0.5 * self.p.lambda_hop, 0.5 * self.p.lambda_hop))
-                _Q_iter_counter = 0
-            else:
-                # Q frozen: keep current Q as output so Anderson does not try to change it.
-                Q_out = Q
+            # ── Q update: only pass the new value to the Anderson vector when the displacement is significant.
+            # This keeps the Pulay history clean for the electronic variables (Δ, M) while allowing Q to respond promptly when it actually wants to move.
+            Q_out_raw = -(self.p.g_JT / max(_K_eff_scf, 1e-9)) * B1g_exp
+            Q_out_raw = float(np.clip(Q_out_raw, -0.5 * self.p.lambda_hop, 0.5 * self.p.lambda_hop))
+
+            _q_displacement = abs(Q_out_raw - Q)
+            _q_update_now   = (
+                iteration == 0
+                or (_q_displacement > _Q_THR_REL * self.p.lambda_hop)
+                or (iteration % _Q_UPDATE_PERIOD == 0)
+            )
+            Q_out = Q_out_raw if _q_update_now else Q
             
             # Update Λ_inst: Rayleigh λ_pair, λ_JT=(g²/K)·χ_QQ, J·χ_SS
             if _vertex_cache is not None:
@@ -2908,8 +2939,8 @@ class RMFT_Solver:
                         _alpha = _alpha_base * 0.95
                     else:
                         _alpha = _alpha_base
-                    # Q update this iteration → be more conservative
-                    if _q_update_now:
+                    # Q injected this iteration (genuine displacement) → be more conservative
+                    if _q_update_now and _q_displacement > _Q_THR_REL * self.p.lambda_hop:
                         _alpha = min(_alpha, _MIXING * 0.3)
 
                 # --- Alpha freeze recovery ---
@@ -3392,6 +3423,7 @@ class RMFT_Solver:
             'chi_tau_sc': _chi_tau_result['chi_tau_sc'],
             'chi_tau_n': _chi_tau_result['chi_tau_n'],
             'richardson_ok': _chi_tau_result['richardson_ok'],
+            'chi_tau_weight': _chi_tau_result['chi_tau_weight'],   # 1.0=full, 0.5=halved, 0.0=suppressed
             'Ut_ratio': _chi_tau_result['Ut_ratio'],
             'density': n_kspace_new,
             'mu': mu,
@@ -3799,73 +3831,64 @@ class RMFT_Solver:
             except Exception:
                 return 1e30, False
 
-        # ── Helper: find crossing temperature (F_SC = F_NM) ──────────────────────
-        def _find_crossing(T_vals: list, seed: dict) -> tuple:
-            """Returns (T_cross, last_D, last_Q, history) or (0.0, 0.0, 0.0, []) if not found."""
-            history = []
-            _seed = seed.copy()
-            T_cross = 0.0
-            last_D = 0.0
-            last_Q = 0.0
+        # ── Helper: single upward heating pass — crossing + spinodal in one scan ─
+        def _find_crossing_and_spinodal(T_vals: list, seed: dict) -> tuple:
+            """
+            Single pass over ascending T_vals.  Per T-point: one SC-basin SCF and one
+            NM-basin SCF (same cost as before, but only once per point instead of twice).
+
+            Crossing (F_SC = F_NM): interpolated between last sc_wins and first sc_loses.
+            After the crossing the seed keeps advancing so hysteresis remains trackable.
+
+            Spinodal (SC basin collapses, Delta < Delta_tol): recorded at first collapse;
+            pass terminates immediately after. When collapse precedes crossing (2nd-order
+            like), T_cross = 0.
+            """
+            history      = []
+            _seed        = seed.copy()
+            T_cross      = 0.0;  D_cross      = 0.0;  Q_cross      = 0.0
+            T_spinodal   = 0.0;  D_spinodal   = 0.0;  Q_spinodal   = 0.0
+            _cross_found = False
 
             for i, T in enumerate(T_vals):
                 s = _make_solver_at_T(T)
-                D_eff, Q_eff, M_eff, F_sc, _, collapsed = _eval_sc_basin(s, _seed['M'], _seed['Q'], _seed['Delta'])
+                D_eff, Q_eff, M_eff, F_sc, _, collapsed = _eval_sc_basin(
+                    s, _seed['M'], _seed['Q'], _seed['Delta'])
                 F_nm, _ = _eval_normal_basin(s)
 
                 sc_wins = (not collapsed) and (F_sc < F_nm)
-
                 history.append((T, D_eff, Q_eff, F_sc, F_nm, sc_wins))
 
-                if sc_wins and not collapsed:
-                    _seed['M'] = M_eff
-                    _seed['Q'] = Q_eff
-                    _seed['Delta'] = max(D_eff, Delta_tol * 10)
-                    last_D = D_eff
-                    last_Q = Q_eff
-                elif not sc_wins and not collapsed and i > 0:
-                    # Linear interpolation of the crossing: F_SC(T_{i-1}) < F_NM, F_SC(T_i) >= F_NM
-                    prev = history[-2]
-                    dF_prev = prev[3] - prev[4]   # F_sc - F_nm at T_{i-1}
-                    dF_curr = F_sc - F_nm         # F_sc - F_nm at T_i
-                    denom_interp = dF_curr - dF_prev
-                    if abs(denom_interp) > 1e-30:
-                        T_cross = T_vals[i-1] - dF_prev * (T - T_vals[i-1]) / denom_interp
-                    else:
-                        T_cross = T_vals[i-1]
-                    last_D = prev[1]
-                    last_Q = prev[2]
-                    break
-            return T_cross, last_D, last_Q, history
-
-        # ── Helper: find spinodal temperature (SC minimum vanishes) ─────────────
-        def _find_spinodal_heating(T_vals: list, seed: dict) -> tuple:
-            """Returns (T_spinodal, last_D, last_Q, history)."""
-            history = []
-            _seed = seed.copy()
-            T_spinodal = 0.0
-            last_D = 0.0
-            last_Q = 0.0
-
-            for i, T in enumerate(T_vals):
-                s = _make_solver_at_T(T)
-                D_eff, Q_eff, M_eff, F_sc, conv_sc, collapsed = _eval_sc_basin(s, _seed['M'], _seed['Q'], _seed['Delta'])
-
-                history.append((T, D_eff, Q_eff, F_sc, float('nan'), not collapsed))
-
-                if collapsed:
+                # ── spinodal: SC basin collapsed ─────────────────────────────────────
+                if collapsed and T_spinodal == 0.0:
                     T_spinodal = T
                     if i > 0:
-                        last_D = history[-2][1]
-                        last_Q = history[-2][2]
-                    break
+                        D_spinodal = history[-2][1]
+                        Q_spinodal = history[-2][2]
+                    break   # no SC state to track further
 
-                _seed['M'] = M_eff
-                _seed['Q'] = Q_eff
+                # ── crossing: F_SC first exceeds F_NM ───────────────────────────
+                if not _cross_found:
+                    if sc_wins:
+                        D_cross = D_eff
+                        Q_cross = Q_eff
+                    elif i > 0:
+                        prev         = history[-2]
+                        dF_prev      = prev[3] - prev[4]   # F_sc - F_nm at T_{i-1}
+                        dF_curr      = F_sc - F_nm
+                        denom_interp = dF_curr - dF_prev
+                        T_cross = (T_vals[i-1] - dF_prev * (T - T_vals[i-1]) / denom_interp
+                                   if abs(denom_interp) > 1e-30 else T_vals[i-1])
+                        D_cross      = prev[1]
+                        Q_cross      = prev[2]
+                        _cross_found = True
+
+                # advance warm seed while SC basin is alive
+                _seed['M']     = M_eff
+                _seed['Q']     = Q_eff
                 _seed['Delta'] = max(D_eff, Delta_tol * 10)
-                last_D = D_eff
-                last_Q = Q_eff
-            return T_spinodal, last_D, last_Q, history
+
+            return T_cross, D_cross, Q_cross, T_spinodal, D_spinodal, Q_spinodal, history
 
         # ── Helper: find spinodal from cooling (normal → SC) ─────────────────────
         def _find_spinodal_cooling(T_vals: list) -> tuple:
@@ -3918,11 +3941,38 @@ class RMFT_Solver:
         # Initial seed from low-T SC result
         seed_init = {'M': M0, 'Q': Q0, 'Delta': max(Delta0, 1e-3)}
 
-        # ── 2. Find crossing temperature ─────────────────────────────────────────
-        T_cross, D_cross, Q_cross, cross_history = _find_crossing(T_vals, seed_init)
+        # ── 2. Single upward heating pass: crossing + spinodal together ──────────
+        (T_cross, D_cross, Q_cross,
+         T_spinodal, D_spinodal, Q_spinodal,
+         heating_history) = _find_crossing_and_spinodal(T_vals, seed_init)
 
-        # ── 3. Find spinodal from heating ────────────────────────────────────────
-        T_spinodal, D_spinodal, Q_spinodal, spinod_history = _find_spinodal_heating(T_vals, seed_init)
+        cross_history  = heating_history
+        spinod_history = heating_history
+
+        # ── 3. Ginzburg-Landau extrapolation for precise Tc near second-order transition ──
+        def _gl_extrapolate_Tc(history: list) -> float:
+            # h[5] = sc_wins in merged history; use h[1] > _GL_DELTA_MIN
+            # (non-zero Delta) to include all alive-SC points regardless of whether F_SC < F_NM, since GL fit needs the Δ(T) collapse shape.
+            valid = [h for h in history if h[1] > _GL_DELTA_MIN]
+            if len(valid) < _GL_MIN_PTS:
+                return float('nan')
+            pts = valid[-_GL_MAX_PTS:]
+            T_v  = np.array([h[0] for h in pts])
+            D2_v = np.array([h[1]**2 for h in pts])
+            a, b = np.polyfit(T_v, D2_v, 1)
+            if a >= 0.0:   # Δ² increasing with T: unphysical, discard
+                return float('nan')
+            return float(-b / a)
+
+        _Tc_GL = _gl_extrapolate_Tc(spinod_history)
+        # Apply GL refinement only when transition is near-second-order:
+        # for first-order transitions Δ² vanishes discontinuously, making linear extrapolation unreliable.
+        # Guard: last-stable Δ must be < 15% of Δ₀ to qualify as continuous collapse.
+        _gl_delta_jump_ok = (D_spinodal / max(Delta0, 1e-9)) < 0.15
+        if (np.isfinite(_Tc_GL) and T_spinodal > 0.0
+                and abs(_Tc_GL - T_spinodal) < _GL_TC_MARGIN * T_max
+                and _gl_delta_jump_ok):
+            T_spinodal = _Tc_GL   # refine coarse grid point with GL fit
 
         # ── 4. Optional: find spinodal from cooling (hysteresis check) ──────────
         T_spinodal_cool = float('nan')
@@ -3990,12 +4040,9 @@ class RMFT_Solver:
         # ── 6. Compute ratio and combine history ─────────────────────────────────
         ratio = (2.0 * Delta0 / Tc) if Tc > 1e-8 else 0.0
 
-        # Combine histories for return
-        combined_history = []
-        for h in cross_history:
-            combined_history.append(('cross',) + h)
-        for h in spinod_history:
-            combined_history.append(('spinod',) + h)
+        # heating_history is the single shared scan; label each row for clarity.
+        combined_history = [('heating',) + h for h in heating_history]
+        # cooling history appended separately if available
 
         return {
             'Tc':               Tc,
@@ -4013,16 +4060,18 @@ class RMFT_Solver:
     
     def compute_lambda_vs_T(self, doping: float, sc_result: dict) -> Dict:
         """
-        Compute the linearised gap eigenvalue λ_max(T) across a temperature range.
+        Linearised gap eigenvalue λ_max(T) across a temperature range.
 
-        λ_max(T) is the largest eigenvalue of the linearised gap equation kernel at each T.
-        It measures the strength of the pairing instability: λ_max(Tc) = 1 by definition.
+        Each point: (1) normal-state SCF at temperature T with Δ≡0, so M(T) and
+        Q(T) relax self-consistently without a condensate biasing the bands;
+        (2) solve_linearized_gap_equation on that normal-state background.
+        This avoids the T=0 AFM Weiss field artefact (artificially split bands →
+        λ never reaches 1) from the previous implementation that passed the
+        converged SC gaps into the linearised kernel.
 
-        Diagnostics available from the curve:
-          • Slope |dλ/dT|_Tc  — steeper → stronger coupling, less fluctuation-dominated
-          • Strong-coupling signal: λ_max(T) deviates strongly from BCS tanh(T/Tc) form
-          • Non-monotonic λ_max(T): indicates competing orders or fluctuation enhancement
-          • Asymptotic λ_max(T→0): should saturate; if still rising → not fully converged k-grid
+        Diagnostics:
+          λ_max(Tc)=1 by definition; slope |dλ/dT|_Tc measures coupling strength.
+          Non-monotone λ(T) flags competing orders or SC-JT fluctuation enhancement.
         """
         T_points = np.geomspace(self.kT * 0.25, self.kT * 4.0, 20)
         lam_arr  = np.zeros(len(T_points))
@@ -4035,24 +4084,28 @@ class RMFT_Solver:
             s_T._K_bare = self._K_bare
             s_T._reset_transient_state()
             try:
+                # Normal-state SCF: Δ strictly zero so M(T), Q(T) relax without condensate.
                 res = s_T.solve_self_consistent(
-                    target_doping  = doping,
-                    initial_M      = float(np.clip(sc_result['M'], 0.02, 0.45)) if sc_result['converged'] else self.p.estimate_M0(doping, sc_result['lambda_lin_max']),
-                    initial_Q      = 1e-5,
-                    initial_Delta  = 0.0,   # The SC gap is intentionally set to zero so λ_max(T) measures the linearised pairing instability, not the already-condensed state.
-                    verbose        = False,
+                    target_doping = doping,
+                    initial_M     = self.p.estimate_M0(doping, sc_result.get('lambda_lin_max', 1.0)),
+                    initial_Q     = 1e-5,
+                    initial_Delta = 0.0,
+                    verbose       = False,
                 )
                 M   = res['M']
                 Q   = res['Q']
                 mu  = res['mu']
-                tx  = res['tx']
-                ty  = res['ty']
                 g_J = res['g_J']
-                actual_doping = float(1.0 - res['density'])
+                g_t = res['g_t']
+                actual_doping  = float(1.0 - res['density'])
+                tx_b, ty_b     = s_T.p.effective_hopping_anisotropic(Q)
+                tx, ty         = g_t * tx_b, g_t * ty_b
+                J_eff_lT       = self.p.Z * self.p.effective_superexchange(g_J, tx_b, ty_b, doping) * res['j_renorm']
 
-                _tx_b_lT, _ty_b_lT = s_T.p.effective_hopping_anisotropic(Q)
-                _J_eff_lT = self.p.Z * self.p.effective_superexchange(g_J, _tx_b_lT, _ty_b_lT, target_doping) * res['j_renorm']
-                lin = s_T.solve_linearized_gap_equation(M, Q, complex(res['Delta_s']), complex(res['Delta_d']), doping, mu, tx, ty, g_J, res['g_t'], res['K_eff_scf'], _J_eff_lT, res['j_renorm'], actual_doping=actual_doping)
+                # Linearised gap at this T's normal-state background (Δ_in=0).
+                lin = s_T.solve_linearized_gap_equation(
+                    M, Q, 0.0j, 0.0j, doping, mu, tx, ty, g_J, g_t,
+                    res['K_eff_scf'], J_eff_lT, res['j_renorm'], actual_doping)
                 lam_arr[i] = float(lin['lambda_lin_max'])
                 sym_list.append(lin['gap_symmetry'])
             except Exception:
@@ -4292,8 +4345,7 @@ class RMFT_Solver:
             V_eff = V_dom + V_dom * (self.p.g_JT**2 * chi_DQ_dom**2) / (max(chi_DD_dom, 1e-12) * K_eff_here * G22)
         else:
             V_eff = V_dom   # spontaneous-JT regime: no SC-triggered boost
-        lambda_eff = N_eff * V_eff        #  λ_eff used as soft-constraint S2 signal, not as a hard SCF gatekeeper.
-        Tc_est     = float(_BCS_TC_PREFACTOR * t_eff * np.exp(-1.0 / lambda_eff)) if lambda_eff > 1e-3 else 0.0
+        lambda_eff = N_eff * V_eff        #  λ_eff used as soft-constraint S2 signal
 
         J_eff           = self.p.Z * self.p.effective_superexchange(g_J, self.p.t0, self.p.t0, target_doping)
         # Standalone Moriya call: used only for the H2/jchi_gate Moriya-damped chi_DD_s_moriya
@@ -4415,7 +4467,6 @@ class RMFT_Solver:
         result['det_G']            = float(np.linalg.det(G3))
         result['V_eff']            = float(V_eff)
         result['lambda_eff']       = float(lambda_eff)
-        result['Tc_estimate']      = Tc_est
         result['d2F_Q_normal']     = float(K_eff_here - chi_QQ)
         result['sc_triggered_jt']  = False
         result['dlambda_pair_dQ']  = dlambda_dQ
@@ -4782,7 +4833,7 @@ class VectorizedBdG:
             'Pair_d':  Pair_d,
         }
 
-    def compute_gap_eq_vectorized(self, M: float, Q: float, Delta_s: complex, Delta_d: complex, target_doping: float, mu: float, tx: float, ty: float, g_J: float, g_t: float, K_eff: float, g_Delta_s: float, g_Delta_d: float, j_renorm: float, _bdg_cache: tuple = None, _vertex_cache: dict = None) -> Tuple[float, float, dict]:
+    def compute_gap_eq_vectorized(self, M: float, Q: float, Delta_s: complex, Delta_d: complex, target_doping: float, mu: float, tx: float, ty: float, g_J: float, g_t: float, K_eff: float, g_Delta_s: float, g_Delta_d: float, j_renorm: float, _solve_state: '_SolveState', _bdg_cache: tuple = None, _vertex_cache: dict = None) -> Tuple[float, float, dict]:
         """
         Gap equation with q-dependent RPA pairing vertex V(q) built from normal-state
         (Δ=0) susceptibilities. Δ enters only via the anomalous pair amplitudes
@@ -4961,16 +5012,17 @@ class VectorizedBdG:
                 V_d_scalar = float(np.clip(V_d_scalar, -_V_cap, _V_cap))
 
                 # Sign-flip guard: SCF-scale changes in M/Q cannot physically reverse V_d sign.
-                _sign_flipped = (_V_d_ema_state is not None
-                                 and V_d_scalar * _V_d_ema_state < 0.0
-                                 and abs(_V_d_ema_state) > _V_PREV_SIGN_FLOOR)
+                # Suppress with EMA; blend weight scales continuously with det_afm
+                _sign_flipped = (_solve_state.V_d_ema is not None
+                                 and V_d_scalar * _solve_state.V_d_ema < 0.0
+                                 and abs(_solve_state.V_d_ema) > _V_PREV_SIGN_FLOOR)
                 if _sign_flipped:
-                    _det_x  = abs(_det_afm) / _DET_SIGN_FLIP_SCALE
+                    _det_x    = abs(_det_afm) / _DET_SIGN_FLIP_SCALE
                     _w_factor = _EMA_SIGN_FLIP_W_MIN + (1.0 - _EMA_SIGN_FLIP_W_MIN) / (
                         1.0 + math.exp(-_EMA_SIGN_FLIP_SLOPE * (_det_x - 0.5)))
-                    _ema_w     = _EMA_NEW_WEIGHT * _w_factor
-                    V_d_scalar = (1.0 - _ema_w) * _V_d_ema_state + _ema_w * V_d_scalar
-                _V_d_ema_state = V_d_scalar   # always update with corrected value
+                    _ema_w    = _EMA_NEW_WEIGHT * _w_factor
+                    V_d_scalar = (1.0 - _ema_w) * _solve_state.V_d_ema + _ema_w * V_d_scalar
+                _solve_state.V_d_ema = V_d_scalar
 
                 # V_full_mat structure flags for SCF log
                 V_flat          = V_full_mat[iu, ju]
@@ -5393,7 +5445,8 @@ class UnifiedBayesianOptimizer:
         lmin    = float(G_res['lambda_min'])
         V_JT    = solver.p.g_JT**2 / max(solver._K_bare, _MATH_EPS)
         chi_orb = float(G_res['chi_QQ']) / max(solver.p.g_JT**2, 1e-12)
-        lam_JT  = V_JT * chi_orb   # = chi_QQ/K_bare; dimensionless
+        # lam_JT = g²·χ_QQ(Δ=0)/K_bare: normal-state dimensionless JT coupling. Stable normal state requires lam_JT < 1 (χ_QQ < K_bare).
+        lam_JT  = V_JT * chi_orb   # = chi_QQ / K_bare
 
         S1 = (0.0 if 0.0 < lmin < _DE_LAMBDA_MIN_OPT
               else min(abs(lmin) if lmin <= 0 else max(0.0, lmin - _DE_LAMBDA_MIN_OPT), 1.0))
@@ -5833,12 +5886,8 @@ class UnifiedBayesianOptimizer:
         G_n = (solver.compute_G_instability(doping, M_conv, compute_dlambda=False) if result is not None else {})
         if Delta < 1e-8 and Tc < 1e-6:
             return self._g_fallback_score(initial_M, doping, Delta_tetra, u, gJT, t_pd)
-
-        stoner_ok = not result['afm_unstable']
-
-        # lambda_JT = (g²/K)·χ_tau: SC-triggered JT coupling (requires Δ≠0).
-        K_eff = max(result['K_eff_scf'], _MATH_EPS)
-        lambda_JT = (solver.p.g_JT**2 / K_eff) * max(-float(result['chi_tau_sc']), 0.0)
+        
+        lambda_JT_sc = (solver.p.g_JT**2 / max(result['K_eff_scf'], _MATH_EPS)) * max(-float(result['chi_tau_sc']), 0.0)
 
         # G_sc: SC-state quantities for _score (d2F_Q at Δ≠0; chi_DQ_sc = Tr[S_z·χ⁰_anom[Γ₆,Γ₇]]).
         if result is not None and converged and Delta > solver.p.tol:
@@ -5858,21 +5907,22 @@ class UnifiedBayesianOptimizer:
             # No SC gap or not converged — _score handles nan gracefully via fallback 0.5
             G_sc: dict = {}
 
-        score = self._score(Delta, converged, result, Tc, G_n, G_sc, lambda_JT)
+        score = self._score(Delta, converged, result, Tc, G_n, G_sc, lambda_JT_sc)
         lambda_lin_max = result['lambda_lin_max']
         lambda_JT_kernel = result.get('lambda_JT_kernel', float('nan'))
         G_chi_K = G_n['chi_QQ'] / max(G_n['K_eff'], _MATH_EPS)
-        regime  = ('SC-triggered' if 0.05 < lambda_JT < 1.0
-                     else ('strong-coupling' if lambda_JT >= 1.0 else 'JT-closed'))
+        regime  = ('SC-triggered' if 0.05 < lambda_JT_sc < 1.0
+                     else ('strong-coupling' if lambda_JT_sc >= 1.0 else 'JT-closed'))
         _hmin = (result['hessian_result'].get('min_curvature') or float('nan'))
+        stoner_ok = not result['afm_unstable']
         _scf_log(tag,
                  f"D={Delta:.5f} Tc={Tc*1000:.2f}meV score={score:.5f}"
-                 f" lJT={lambda_JT:.3f}[{regime}]"
-                 f" lJT_ker={lambda_JT_kernel:.3f}"
+                 f" λ_JT_sc={lambda_JT_sc:.3f}[{regime}]"
+                 f" λ_JT_ker={lambda_JT_kernel:.3f}"
                  f" λ_lin_max={lambda_lin_max:.3f}({result['gap_symmetry']})"
                  f" cQQ/K={G_chi_K:.3f} lmin(H)={_hmin:+.4f}[{G_n['instab_dir']}]"
                  f" {'ok' if converged else 'nc'} ({_time.time()-t0:.1f}s)")
-        return OptimPoint(doping, Delta_tetra, u, gJT, t_pd, Delta, converged, result, lambda_JT, lambda_lin_max, stoner_ok, score, Tc, lambda_soc)
+        return OptimPoint(doping, Delta_tetra, u, gJT, t_pd, Delta, converged, result, lambda_JT_sc, lambda_lin_max, stoner_ok, score, Tc, lambda_soc)
 
     def _g_fallback_score(self, M0, doping, Delta_tetra, u, gJT, t_pd) -> 'OptimPoint':
         """Cheap G-matrix proxy score when SCF finds no SC gap.
@@ -5891,7 +5941,7 @@ class UnifiedBayesianOptimizer:
             G = s2.compute_G_instability(doping, M0, compute_dlambda=False)
         except Exception:
             return OptimPoint(doping, Delta_tetra, u, gJT, t_pd, 0.0, False, score=0.0)
-        G22 = G['G22']; lm = G['lambda_min']; Te = G['Tc_estimate']
+        G22 = G['G22']; lm = G['lambda_min']
         if G22 <= 0.0 or lm <= 0.0:
             return OptimPoint(doping, Delta_tetra, u, gJT, t_pd, 0.0, False, score=0.0)
 
@@ -5907,7 +5957,8 @@ class UnifiedBayesianOptimizer:
         proj_factor_fb = 1.0 - 0.5 * _proj_pen_fb
 
         g22_f = _BO_SPONT_JT_PEN + (1.0 - _BO_SPONT_JT_PEN) / (1.0 + np.exp(-G22 / _BO_SIGMOID_W))
-        sc = _BO_G_FALLBACK * (1.0 - min(lm, 1.0)) * g22_f * (1.0 + min(Te / 0.004, 8.0)) * proj_factor_fb
+        _leff_gate = float(np.clip(G['lambda_eff'] / 0.5, 0.0, 3.0))   # scale so λ_eff=0.5 → gate=1
+        sc = _BO_G_FALLBACK * (1.0 - min(lm, 1.0)) * g22_f * (1.0 + _leff_gate) * proj_factor_fb
         return OptimPoint(doping, Delta_tetra, u, gJT, t_pd, 0.0, False, score=sc)
 
     def _score(self, Delta: float, converged: bool, result: dict, Tc: float, G_n: dict, G_sc: dict, lambda_JT: float = float('nan')) -> float:
@@ -5921,7 +5972,9 @@ class UnifiedBayesianOptimizer:
             proj    : 4×4 projection penalty when J_eff/Δ_CF not small (Γ₇b contamination)
 
         Tier 2 — Smooth mechanism weights (continuous in [0,1]):
-            w_lJT        : λ_JT ∈ (0,1) parabola peak at 0.45
+            w_lJT        : λ_JT_sc parabola arch on [0,1]; x=(λ_JT−0.05)/0.95,
+                           arch = clip(−x(x−1)/_BO_ARCH_DENOM, 0, 1).
+                           Mathematical peak of unclipped parabola at x=0.5 → λ_JT≈0.52; w_lJT=0.10 for λ_JT≥1.
             w_lJT_kernel : sigmoid(10·(lJTk − 0.05))
             w_hessian    : sigmoid(−lmin_sc / 0.05), floor 0.30
             w_softening  : sigmoid(−Δ(d²F_Q)/0.05) — SC-induced Q-mode softening
@@ -5956,15 +6009,13 @@ class UnifiedBayesianOptimizer:
             proj_penalty = 0.0
         proj_factor = 1.0 - 0.5 * proj_penalty
         
-        # ── Tier 2: smooth mechanism weights ─────────────────────────────────
-        # λ_JT arch
-        lJT = float(lambda_JT)
-        if not np.isfinite(lJT):
+        # ── Tier 2: smooth mechanism weights (λ_JT arch) ────────────────────────
+        if not np.isfinite(lambda_JT):
             w_lJT = 0.5
-        elif lJT >= 1.0:
+        elif lambda_JT >= 1.0:
             w_lJT = 0.10
         else:
-            lJT_c = float(np.clip(lJT, 0.0, 1.0))
+            lJT_c = float(np.clip(lambda_JT, 0.0, 1.0))
             w_lJT = float(np.clip(-lJT_c * (lJT_c - 1.0) / _BO_ARCH_DENOM, 0.0, 1.0))
 
         # λ_JT_kernel
@@ -6054,22 +6105,7 @@ class UnifiedBayesianOptimizer:
                  gp_seed_top_k: int = 12, turbo_iterations: int = 30,
                  turbo_batch: int = 3, local_refine: bool = True,
                  local_n_grid: int = 10, verbose: bool = True) -> Dict:
-        """
-        Full four-phase optimisation.
-
-        Parameters
-        ----------
-        doping_bounds    : (min, max) carrier doping range
-        param_bounds_5d  : {'Delta_tetra':…, 'lambda_soc':…, 'u':…, 'g_JT':…, 't_pd':…}
-        de_popsize       : DE population size multiplier (total = de_popsize * 5)
-        de_maxiter       : DE maximum generations
-        gp_seed_top_k    : DE candidates evaluated with full SCF for GP seeding
-        turbo_iterations : TuRBO iteration count
-        turbo_batch      : parallel proposals per TuRBO iteration
-        local_refine     : enable Phase 4 local refinement
-        local_n_grid     : Phase 4 grid density
-        verbose          : detailed logging
-        """
+        """ Full four-phase optimisation. """
         t_global = _time.time()
 
         de_phase = self.run_de_phase(
@@ -6123,7 +6159,6 @@ if __name__ == "__main__":
         K_lattice    = 1.200,
         lambda_hop   = 1.100,
         Delta_CT     = 2.000,
-        omega_JT     = 0.057,
         Delta_inplane= 0.010,
         Z            = 4,
         kT           = 0.01,
@@ -6224,7 +6259,9 @@ if __name__ == "__main__":
     _scf_log("G-MATRIX", f"χ_ΔQ (dom)={G_base['chi_DQ_dom']:.4f}  χ_ΔQ_s={G_base['chi_DQ_s']:.4f}"
              f"  χ_ΔQ_d={G_base['chi_DQ_d']:.4f}  [eV⁻¹]")
     _scf_log("G-MATRIX", f"K_eff_norm = {G_base['K_eff']:.4f} eV/Å²  χ_QQ_norm = {G_base['chi_QQ']:.4f} eV⁻¹")
-    _scf_log("G-MATRIX", f"λ_JT_norm=χ_QQ_norm/K_eff_norm = {G_base['chi_QQ']/G_base['K_eff']:.4f}  ({'unstable, λ_JT_norm<1' if G_base['chi_QQ']/G_base['K_eff'] < 1 else 'stable, λ_JT_norm>1 '})")
+    _scf_log("G-MATRIX", f"λ_JT_norm=χ_QQ/K_eff = {G_base['chi_QQ']/G_base['K_eff']:.4f}"
+             f"  ({'✓ stable: χ_QQ < K_eff (lattice rigid)' if G_base['chi_QQ']/G_base['K_eff'] < 1 else '⚠ soft: χ_QQ ≥ K_eff (JT onset)'})  "
+             f"[note: λ_JT_norm < 1 → stable; λ_JT_norm ≥ 1 → spontaneous JT risk]")
     _scf_log("G-MATRIX", f"3×3 eigs: [{G_base['eigs3'][0]:.4f},{G_base['eigs3'][1]:.4f},{G_base['eigs3'][2]:.4f}]")
     _scf_log("G-MATRIX", f"evec_min=[{G_base['evec_min'][0]:.3f},{G_base['evec_min'][1]:.3f},"
              f"{G_base['evec_min'][2]:.3f}]  → instab_dir: {G_base['instab_dir']}")
@@ -6332,6 +6369,8 @@ if __name__ == "__main__":
         _scf_log("SCF-RES", f"  λ_JT_sc={_jt_win['lambda_JT_sc']:.4f}"
                 f"  λ_JT_opt={_jt_win['lambda_JT_opt']:.4f}"
                 f" { '✓ Richardson ok' if _ref_result['richardson_ok'] else '  ⚠ Richardson inconsistent'}"
+                f"  χ_τ_weight={_ref_result.get('chi_tau_weight', 1.0):.1f}"
+                f"{'  [halved: finer-scale estimate]' if _ref_result.get('chi_tau_weight', 1.0) == 0.5 else '  [suppressed: fully nonlinear]' if _ref_result.get('chi_tau_weight', 1.0) == 0.0 else ''}"
                 f" {'  ⚠ normal-state unstable' if _jt_win['normal_unstable'] else ''}")
         _scf_log("SCF-RES", f"{'⚠ SC could distort lattice (λ_JT > 1, spontaneous JT regime)' if _jt_win['lambda_JT_sc'] > 1 else '✓ SC-JT coupling active' if _jt_win['lambda_JT_sc'] > _LAMBDA_JT_VIABLE else '✗ SC-JT coupling too weak'}")
         _scf_log("SCF-RES", f"  → {_jt_win['note']}")
@@ -6342,41 +6381,24 @@ if __name__ == "__main__":
 
         _scf_log("TC-PRELIM", "="*60)
         _scf_log("TC-PRELIM", f"Pre-BO Tc estimates at |Δ|={_pre_Delta_total*1000:.3f} meV")
-        # Tc₁: G-BCS using λ_eff from G-matrix (Schur-complement corrected).
-        # Tc₂: λ_max-BCS with cutoff max(t_eff, ω_JT) — JT phonon sets scale when ω_JT > t_eff.
+        # Tc₁: McMillan strong-coupling formula; ω_SF = J_eff (paramagnon bandwidth); λ(T)=1 crossing from normal-state SCF at each T (Δ≡0 background).
         if _sc_viable:
+            _omega_SF  = float(_ref_result.get('J_eff', params.Z * params.J_CT))
+            _lmax_safe = max(_lmax_ref, _MATH_EPS)
+            _Tc1_eV    = float((_omega_SF / _MAD_DENOM) * np.exp(-_MAD_NUM * (1.0 + _lmax_safe) / _lmax_safe))
             _scf_log("TC-PRELIM",
-                    f"  Tc₁(G-BCS):    λ_eff={G_base['lambda_eff']:.4f}"
-                    f"  → {G_base['Tc_estimate']*1000:.2f} meV  ({G_base['Tc_estimate'] / _KB_EV:.1f} K)")
-            
-            _cutoff = max(np.sqrt(0.5 * (float(_ref_result['tx'])**2 + float(_ref_result['ty'])**2)), params.omega_JT)     # relevant boson cutoff
-            _Tc2_eV = float(_BCS_TC_PREFACTOR * _cutoff * np.exp(-1.0 / max(_lmax_ref, _MATH_EPS)))
-            _scf_log("TC-PRELIM",
-                    f"  Tc₂(λ_max-BCS):λ_max={_lmax_ref:.4f}"
-                    f"  ω_JT={params.omega_JT*1000:.1f} meV"
-                    f"  → {_Tc2_eV*1000:.2f} meV  ({_Tc2_eV / _KB_EV:.1f} K)")
-        
+                    f"  Tc₁(McMillan-SF): λ_max={_lmax_ref:.4f}"
+                    f"  ω_SF(J_eff)={_omega_SF*1000:.1f} meV"
+                    f"  → {_Tc1_eV*1000:.2f} meV  ({_Tc1_eV / _KB_EV:.1f} K)")
+            _scf_log("TC-PRELIM", f"  λ_eff(Schur+JT)={G_base['lambda_eff']:.4f}")
+
             _lT = solver.compute_lambda_vs_T(target_doping, _ref_result)
-            _scf_log("TC-SIMPLE", f"Tc(λ=1)={_lT['Tc_lambda']*1000:.2f} meV  slope={_lT['slope_at_Tc']*1000:.3f} meV⁻¹")
+            _scf_log("TC-SIMPLE", f"Tc₃(λ=1)={_lT['Tc_lambda']*1000:.2f} meV  slope={_lT['slope_at_Tc']*1000:.3f} meV⁻¹"
+                     f"  n_crossings={_lT['n_crossings']}")
 
-        # ── TC-PRELIM: Thermodynamic Tc from reference SCF (ad-hoc params) ──────
+        # Tc₂ and Tc₃: thermodynamic Tc from reference SCF (first-order aware)
         if _pre_Delta_total > 1e-5:
-            # Expected 2Δ₀/kTc > 3.52: JT feedback enhances Δ beyond BCS;
-            # proximity to AFM QCP suppresses Tc via pair-breaking spin fluctuations.
-            Tc = solver.compute_Tc_by_gap_suppression(target_doping, _ref_result)['Tc']
-            ratio_2D = 2.0 * _pre_Delta_total / Tc
-
-            if ratio_2D < _BCS_RATIO_STRONG:
-                coupling_regime = 'BCS-like'
-            elif ratio_2D < _BCS_RATIO_VSTRONG:
-                coupling_regime = 'strong'
-            elif ratio_2D < _BCS_RATIO_EXOTIC:
-                coupling_regime = 'very-strong'
-            else:
-                coupling_regime = 'exotic / non-phononic'
-            _scf_log("TC-SIMPLE", f"2Δ₀/kTc = {ratio_2D:.3f}  [{coupling_regime}]  Tc={Tc / _KB_EV:.1f} K")
-
-            _scf_log("TC-PRELIM", "  Thermodynamic Tc from reference SCF (warm-start; first-order aware):")
+            _scf_log("TC-PRELIM", "  Tc₃(thermo, warm-start): first-order-aware free-energy crossing + spinodal:")
             try:
                 _Tc_ref_thermo = solver.compute_Tc_thermodynamic(
                     target_doping,
@@ -6392,18 +6414,29 @@ if __name__ == "__main__":
                 _ord_r   = _Tc_ref_thermo['transition_order']
                 _Dj_r    = _Tc_ref_thermo['Delta_jump']
                 _scf_log("TC-THERMO",
-                         f"  Tc(thermo)={_Tc_rt*1000:.2f} meV ({_Tc_rt*_EV_TO_K:.1f} K)"
-                         f"  Tc(spinodal)={_Tc_rs*1000:.2f} meV"
+                         f"  Tc₂(thermo)={_Tc_rt*1000:.2f} meV ({_Tc_rt*_EV_TO_K:.1f} K)"
+                         f"  Tc₃(spinodal)={_Tc_rs*1000:.2f} meV"
                          f"  order={_ord_r}"
                          f"  Δ_jump={_Dj_r*1000:.2f} meV")
-                _scf_log("Tc-THERMO", f"  2Δ₀/kTc={_Tc_ref_thermo['ratio_2D']:.2f}")
+                # 2Δ₀/kTc ratio from Tc₂
+                if _Tc_rt > 1e-8:
+                    ratio_2D = 2.0 * _pre_Delta_total / _Tc_rt
+                    if ratio_2D < _BCS_RATIO_STRONG:
+                        coupling_regime = 'BCS-like'
+                    elif ratio_2D < _BCS_RATIO_VSTRONG:
+                        coupling_regime = 'strong'
+                    elif ratio_2D < _BCS_RATIO_EXOTIC:
+                        coupling_regime = 'very-strong'
+                    else:
+                        coupling_regime = 'exotic / non-phononic'
+                    _scf_log("TC-THERMO", f"  2Δ₀/kTc={ratio_2D:.3f}  [{coupling_regime}]  (from Tc₂)")
                 if _Tc_rs > 1e-6:
                     _uplift_r = (_Tc_rt - _Tc_rs) / _Tc_rs * 100.0
                     _scf_log("TC-THERMO",
                              f"  Tc uplift from SC-JT: {_uplift_r:+.1f}%"
                              f"  [{'first-order dominant' if abs(_uplift_r)>20 else 'weakly first-order' if abs(_uplift_r)>5 else 'effectively second-order'}]")
             except Exception as _Tc_rt_err:
-                _scf_log("TC-THERMO", f"  Thermodynamic Tc (ref) failed: {_Tc_rt_err}")
+                _scf_log("TC-THERMO", f"  Tc₃ (thermo) failed: {_Tc_rt_err}")
         else:
             _scf_log("TC-THERMO",
                      f"  Thermodynamic Tc skipped: |Δ|={_pre_Delta_total*1000:.3f} meV < threshold")
