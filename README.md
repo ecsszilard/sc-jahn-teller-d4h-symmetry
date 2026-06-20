@@ -603,7 +603,20 @@ F_AB_BZ = complex(Σ_k w_k · Pair_d(k)) / 4    (inter-site d-channel; d-wave pr
 
 The `/4` corrects for the 16-dimensional BdG space doubling.
 
-**Why complex-valued F_AA_BZ / F_AB_BZ (not `abs`).** The converged SC state generically carries a nontrivial relative phase between Δ_s and Δ_d. In the previous version both anomalous averages were collapsed to real by taking `abs(...)` before computing the new gap amplitudes. This is incorrect: if the stationary point of the free energy sits at a complex Δ_s/Δ_d pair, stripping the phase shifts the fixed-point equations off the true stationary point and biases the SCF toward real solutions even when the physical minimum is complex. Keeping F_AA_BZ and F_AB_BZ as complex numbers means the gap update `Δ_s_new = g_Delta_s · V_s · F_AA_BZ` inherits the correct phase automatically, so the SCF converges to the true (potentially complex) fixed point without introducing a phase artefact. The phase is also preserved in the Hessian: `compute_hessian` now extracts `phase_s = Δ_s / |Δ_s|` and `phase_d = Δ_d / |Δ_d|` from the converged state and fixes them throughout the finite-difference probes of F(m, q, δ), ensuring that each probe point evaluates the free energy on the correct manifold of the order parameter rather than on a real-valued slice.
+**Why complex-valued F_AA_BZ / F_AB_BZ (not `abs`).** The BdG Hamiltonian `_build_H_stack` is genuinely complex: spin-orbit coupling enters through `Ly_b1g ∝ (L₊ − L₋)/2i` and spin matrices `Sy ∝ σy = [[0,−i],[i,0]]`, making the hole blocks `−H*` non-trivially complex and the Nambu eigenvectors `(uA, uB, vA, vB)` complex-valued at every k-point. The anomalous pair amplitudes
+
+```
+pair_s_k = Σ_n (u_A[Γ₆↑,n]·v_A[Γ₇↓,n]* − u_A[Γ₆↓,n]·v_A[Γ₇↑,n]* + A↔B) · (1 − 2f_n)
+pair_d_k = Σ_n (u_A[Γ₆↑,n]·v_B[Γ₇↓,n]* − ...) · φ_d(k) · (1 − 2f_n)
+```
+
+are therefore generically complex. Taking `abs(F_AA_BZ)` before forming `Δ_s_new = g_s · V_s · F_AA_BZ` would destroy this phase at every iteration, driving the SCF toward a real-valued fixed point even when the true stationary point of the free energy is complex.
+
+In the present model (collinear AFM + SOC, no external magnetic field) the physical gap is expected to be real or to carry only a ±1 global phase, so the complex part of F_AA_BZ / F_AB_BZ at a genuine fixed point is numerically small. However, *during transient SCF iterations* the intermediate Δ_s/Δ_d values need not be real, and forcing `abs` would inject spurious phase flips that destabilise convergence. The correct procedure — carried in the code — is to leave F_AA_BZ / F_AB_BZ complex and let the fixed-point iteration self-consistently settle the phase.
+
+The blending step that follows preserves this phase explicitly. The 2×2 kernel eigenvector `(v_s, v_d)` is real (built from real FS-averaged vertex integrals K11/K22/K12), so it can only constrain the real relative sign between the two channels. It carries no opinion on the complex relative phase `arg(Δ_d/Δ_s)`. If the blended magnitude `_Ds_mag` were multiplied by real `v_s` instead of by `_phase_s_new = Δ_s_new / |Δ_s_new|`, the complex phase produced by the BdG self-consistency would be silently erased at every iteration — precisely the error that `abs()` on F_AA_BZ would cause. The code therefore extracts `_phase_s_new` and `_phase_d_new` from `Delta_s_new / |Delta_s_new|` and multiplies the blended magnitudes by these phases before returning `(_Ds, _Dd)`.
+
+The same logic applies in the Hessian: `compute_hessian` extracts `phase_s = Δ_s / |Δ_s|` and `phase_d = Δ_d / |Δ_d|` from the converged state and fixes them throughout the finite-difference probes, ensuring each probe evaluates the free energy on the correct phase manifold rather than on an artificial real-valued slice.
 
 **Inline 2×2 pairing kernel (K_pair).** Its logic is now executed directly inside `compute_gap_eq_vectorized` at vertex-cache rebuild time, using the already-available FS grids and RPA vertex loop results. The kernel is built in the `(s, d)` channel basis:
 

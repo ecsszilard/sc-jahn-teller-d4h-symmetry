@@ -82,9 +82,6 @@ _CHI_SQ_FLOOR         : float = 1e-12               # amplitude floor for chi_DQ
 _CHI_SQ_S_PADE_W      : float = 0.05                # Padé width w for χ_SQ regularisation: χ_SQ_v=χ_SQ/(1+|χ_SQ|/w); linear at |χ_SQ|≪w, saturates to ±w
 _CHI_SQ_FLOOR_FRAC    : float = 1e-4                # dynamic floor factor calculated from geometric mean
 _QQ_DELTA_THRESH      : float = 1e-8                # |Δ| threshold below which χ_SQ enforced zero
-_MAX_RENORM_SCALE     : float = 2.9                 # validity limit of the momentum-dependent Gutzwiller quasiparticle weight
-_MAX_REGR_CLIP        : float = 3.6                 # hard upper limit for r_J (Gutzwiller + fluctuation enhancement ceiling)
-_CLUSTER_N_EFF_FLOOR  : float = 2.0                 # below this n_eff: force r_J=1, r_Q=r_MQ=0 (too few states for any regression)
 _REGR_T_ALPHA         : float = 0.05                # two-sided significance level for the r_J t-test (H0: r_J=1, i.e. no renormalisation)
 _Q_FM_CLIP_MIN        : float = 0.05                # minimum FM damping moment extent (in BZ π units)
 _Q_FM_CLIP_MAX        : float = 0.50                # maximum FM damping moment extent 
@@ -184,6 +181,11 @@ _ENTROPY_CLIP         : float = 1e-12               # lower clip for f in entrop
 _MATH_EPS             : float = 1e-9                # general protection against division by zero
 _DEN_DERIV_FLOOR      : float = 1e-12               # ∂n/∂μ floor in Newton μ-finder
 _BRENTQ_TOL           : float = 1e-5                # brentq μ-bracketing tolerance
+_MU_NEWTON_MAXIT      : int   = 20                  # Newton/backtrack iteration budget before the guaranteed Brent finish
+_MU_DENSITY_TOL       : float = 1e-6                # |n(μ)−target_n| convergence tolerance
+_MU_SC_DERIV_THRESH   : float = 1e-4                # eV; |Δ_s|+|Δ_d| above which the analytic dn/dμ (exact only for pure-particle/hole BdG branches, i.e. Δ=0) is replaced by a centred numeric derivative — see _find_mu_for_density
+_MU_BACKTRACK_MAX     : int   = 6                   # max step-halvings per Newton iteration before declaring the direction unreliable
+_MU_BACKTRACK_FLOOR   : float = 0.05                # minimum backtracking damping factor η before giving up on the current Newton direction
 
 # ── Gap (Δ) update ────────────────────────────────────────────────────────────
 _ALPHA_MIX_2X2        : float = 0.42                # blend weight of 2×2 eigenvector direction vs fixed-point gap update, 0 = pure fixed-point; 1 = pure 2×2 eigenvector
@@ -414,10 +416,10 @@ class ModelParams:
         """
         Warm-start AFM order-parameter estimate.
         """
-        abs_d     = max(abs(target_doping), 1e-6)
+        abs_d     = max(abs(target_doping), _MATH_EPS)
         g_J       = _GW_G_J_PREFACTOR / (1.0 + abs_d) ** 2
         t_eff     = self.t0 * (_GW_G_T_NUMERATOR * abs_d) / (1.0 + abs_d)
-        bandwidth = 8.0 * max(t_eff, 1e-6)
+        bandwidth = 8.0 * max(t_eff, _MATH_EPS)
         N0        = _GW_DOS_PREFACTOR / bandwidth
         J_eff     = g_J * self.Z * self.J_CT
         S         = float(np.clip(J_eff * N0, 0.0, _M0_S_CLIP_MAX))
@@ -820,7 +822,7 @@ class RMFT_Solver:
         self._rebuild_orbital_operators()
         self._reset_transient_state()
 
-    def _exchange_channels(self, Q: float, q_renorm_cur: float) -> tuple:
+    def _exchange_channels(self, Q: float, q_renorm: float) -> tuple:
         """
         Q-dependent multipolar exchange in the [Γ₆↑, Γ₆↓, Γ₇↑, Γ₇↓] basis.
 
@@ -845,11 +847,12 @@ class RMFT_Solver:
         s_A   = float(np.cosh(2.0 * Q / lam))  # even, longitudinal scale
         s_B   = float(np.sinh(2.0 * Q / lam))  # odd,  transverse scale
 
-        J_A1g_diag   = self.p.Z * self.p.J_CT * s_A * np.array([1.0, 1.0, eta_J**2, eta_J**2])
-        J_B1g_scalar = self.p.Z * self.p.J_CT * s_B * eta_J * q_renorm_cur
+        J_A1g_diag   = self.p.J_CT * s_A * np.array([1.0, 1.0, eta_J**2, eta_J**2])
+        # q_renorm is an additive residual beyond the bare coupling
+        J_B1g_scalar = self.p.J_CT * s_B * eta_J * (1.0 + q_renorm)
         return J_A1g_diag, J_B1g_scalar
 
-    def compute_JT_rigidity_from_exchange(self, M: float, Q: float, mu: float, g_J: float, target_doping: float, g_t_loc: float, q_renorm: float) -> Dict:
+    def compute_JT_rigidity_from_exchange(self, M: float, Q: float, mu: float, g_t: float, g_J: float, target_doping: float, q_renorm: float) -> Dict:
         """
         Exchange contribution to JT stiffness: ∂²F_ex/∂Q².
             F_ex = Σ_{αβ} J_{αβ}(Q)⟨O_α(Q)⟩⟨O_β(Q)⟩
@@ -880,9 +883,9 @@ class RMFT_Solver:
             W[a, a+8]  = -sz_op[a]   # hole A   (p-h conjugate sign)
             W[a, a+12] = -sz_op[a]   # hole B
 
-        H_0 = vbdg._build_H_stack(vbdg._kpts, M, Q, 0.0+0j, 0.0+0j, target_doping, mu, g_t_loc * tx_0, g_t_loc * ty_0, g_J)
-        H_p = vbdg._build_H_stack(vbdg._kpts, M, Q + eps, 0.0+0j, 0.0+0j, target_doping, mu, g_t_loc * tx_p, g_t_loc * ty_p, g_J)
-        H_m = vbdg._build_H_stack(vbdg._kpts, M, Q - eps, 0.0+0j, 0.0+0j, target_doping, mu, g_t_loc * tx_m, g_t_loc * ty_m, g_J)
+        H_0 = vbdg._build_H_stack(vbdg._kpts, M, Q, 0.0+0j, 0.0+0j, target_doping, mu, g_t * tx_0, g_t * ty_0, g_J)
+        H_p = vbdg._build_H_stack(vbdg._kpts, M, Q + eps, 0.0+0j, 0.0+0j, target_doping, mu, g_t * tx_p, g_t * ty_p, g_J)
+        H_m = vbdg._build_H_stack(vbdg._kpts, M, Q - eps, 0.0+0j, 0.0+0j, target_doping, mu, g_t * tx_m, g_t * ty_m, g_J)
 
         H_batch = np.concatenate([H_0, H_p, H_m], axis=0) 
         ev_batch, ec_batch = np.linalg.eigh(H_batch)
@@ -899,7 +902,7 @@ class RMFT_Solver:
         def _J_alpha_beta_Q(Qv):
             # Full 4×4 exchange matrix; J_B1g couples through the SOC-projected B1g operator (U4†·(Lx²−Ly²)·U4).
             J_A1g_diag_v, J_B1g_scalar_v = self._exchange_channels(Qv, q_renorm)
-            return np.diag(J_A1g_diag_v) + J_B1g_scalar_v * self.B1g_op
+            return self.p.Z * (np.diag(J_A1g_diag_v) + J_B1g_scalar_v * self.B1g_op)
 
         O_exp_Q = _calc_O_exp(ev_0, ec_0)
         O_p     = _calc_O_exp(ev_p, ec_p)
@@ -1003,7 +1006,7 @@ class RMFT_Solver:
         exp_k = np.einsum('kn,kn->k', diag_qp, f_n)
         return float(np.dot(self.k_weights, exp_k)) / 4.0
 
-    def _compute_chi_tau(self, M: float, Q: float, Delta_s: complex, Delta_d: complex, target_doping: float, mu: float, tx: float, ty: float, g_t: float, g_J: float, q_renorm: float = 1.0, F67s_mf: float = 0.0) -> Dict:
+    def _compute_chi_tau(self, M: float, Q: float, Delta_s: complex, Delta_d: complex, target_doping: float, mu: float, tx: float, ty: float, g_t: float, g_J: float, q_renorm: float, F67s_mf: float = 0.0) -> Dict:
         """
         JT orbital susceptibility χ_τ = ∂⟨B1g_op⟩/∂(g_JT·Q) via Richardson-extrapolated
         central finite difference of the per-site ⟨B1g_op⟩ expectation value.
@@ -1324,7 +1327,7 @@ class RMFT_Solver:
         chi_SQ_val = float(chi_SQ_cplx.real)
         return chi_SS_val, chi_SQ_val
 
-    def get_susceptibilities_normal(self, q: np.ndarray, M: float, Q: float, target_doping: float, _Gamma_M: float, mu: float, tx: float, ty: float, g_J: float, chi_QQ_bare: float, K_eff: float, J_eff: float, chi_SQ_sc: float, r_MQ: float, E_k_cache: tuple, _enforce_c4: bool = False) -> Tuple[float, float, float, float, float]:
+    def get_susceptibilities_normal(self, q: np.ndarray, M: float, Q: float, target_doping: float, _Gamma_M: float, mu: float, tx: float, ty: float, g_J: float, chi_QQ_bare: float, K_eff: float, J_eff: float, chi_SQ_sc: float, r_MQ: float, E_k_cache: tuple, _enforce_c4: bool = False) -> Tuple[float, float, float, float]:
         """
         Static bare susceptibility tensor χ⁰^{ab}(q) in [Γ₆↑,Γ₆↓,Γ₇↑,Γ₇↓] basis, with RPA resummation and pairing vertex.
         Baym–Kadanoff consistency requires that the vertex is built STRICTLY from the normal-state (Δ=0) Lindhard bubble.  
@@ -1425,7 +1428,7 @@ class RMFT_Solver:
         # χ_QQ soft Dyson regularisation (re-summation of bubble diagrams), as chi_QQ → ∞: ≈ K_bare / V_JT
         chi_QQ_eff = _chi_QQ_pos / (1.0 + _chi_QQ_pos / K_eff)
         chi_QQ_renorm = chi_QQ_eff / max(self.p.g_JT**2, 1e-12)
-        return chi_SS_moriya, chi_SQ_v, chi_QS_v, chi_QQ_renorm, _Gamma_M
+        return chi_SS_moriya, chi_SQ_v, chi_QS_v, chi_QQ_renorm
     
     def _rpa_det(self, J: float, V: float, chi_SS_moriya: float, chi_SQ_v: float, chi_QS_v: float, chi_QQ_renorm: float):
         a = 1.0 - J * chi_SS_moriya
@@ -1463,10 +1466,10 @@ class RMFT_Solver:
         return float(Vp)
 
     def _make_vertex_params(self, target_doping: float, tx: float, ty: float, g_t: float, J_eff: float, K_eff: float) -> Tuple[float, float, float]:
-        Gamma_M_bare = self.p.moriya_gamma(target_doping, g_t * self.p.t0, J_eff)  # bare Moriya damping Γ_M at (ω=0, q→Lindhard)
-        V_JT         = self.p.g_JT**2 / max(K_eff, _MATH_EPS)  # bare JT vertex
-        V_cap        = _RPA_V_CAP_ALPHA * max(_RPA_BW_FACTOR * max(abs(tx), abs(ty), 1e-6), J_eff)  # BEC boundary (8t), UV cap on the RPA pairing vertex
-        return Gamma_M_bare, V_JT, V_cap
+        Gamma_M = self.p.moriya_gamma(target_doping, g_t * self.p.t0, J_eff)  # bare Moriya damping Γ_M at (ω=0, q→Lindhard)
+        V_JT    = self.p.g_JT**2 / max(K_eff, _MATH_EPS)  # bare JT vertex
+        V_cap   = _RPA_V_CAP_ALPHA * max(_RPA_BW_FACTOR * max(abs(tx), abs(ty), 1e-6), J_eff)  # BEC boundary (8t), UV cap on the RPA pairing vertex
+        return Gamma_M, V_JT, V_cap
 
     @staticmethod
     def _fs_integration_weights(pts: np.ndarray, vF_arr: np.ndarray) -> np.ndarray:
@@ -1491,7 +1494,7 @@ class RMFT_Solver:
         dl[sort_idx] = dl_sorted
         return dl / (_BZ_NORM * np.maximum(np.abs(vF_arr), _VF_FLOOR_TIGHT))
 
-    def solve_linearized_gap_equation(self, M: float, Q: float, Delta_s: complex, Delta_d: complex, target_doping: float, actual_doping: float, mu: float, tx: float, ty: float, g_J: float, g_t: float, K_eff: float, J_eff: float, chi_SQ_sc: float = 0.0, r_MQ_cur: float = 1.0, _fs_precomputed: tuple = None) -> Dict:
+    def solve_linearized_gap_equation(self, M: float, Q: float, Delta_s: complex, Delta_d: complex, target_doping: float, actual_doping: float, mu: float, tx: float, ty: float, g_t: float, g_J: float, K_eff: float, J_eff: float, chi_SQ_sc: float = 0.0, r_MQ_cur: float = 1.0, _fs_precomputed: tuple = None) -> Dict:
         """
         Builds the full N_FS × N_FS kernel matrix Γ_ij = √(dl_i·dl_j/(vFi·vFj)) · V(k_i−k_j).
         Finds the LARGEST EIGENVALUE λ_max and its eigenvector (gap symmetry).
@@ -1530,7 +1533,7 @@ class RMFT_Solver:
         _Gamma_M, _V_JT, _V_cap = self._make_vertex_params(actual_doping, tx, ty, g_t, J_eff, K_eff)
         enforce_c4 = (abs(Q) < 1e-3 * self.p.lambda_hop)
         for u_idx, q_u in enumerate(unique_q):
-            chi_SS, chi_SQ, chi_QS, chi_QQ, _ = self.get_susceptibilities_normal(q_u, M, Q, target_doping, _Gamma_M, mu, tx, ty, g_J, chi_QQ_bare, K_eff, J_eff, chi_SQ_sc, r_MQ_cur, E_k_cache_normal, enforce_c4)
+            chi_SS, chi_SQ, chi_QS, chi_QQ = self.get_susceptibilities_normal(q_u, M, Q, target_doping, _Gamma_M, mu, tx, ty, g_J, chi_QQ_bare, K_eff, J_eff, chi_SQ_sc, r_MQ_cur, E_k_cache_normal, enforce_c4)
             V_unique[u_idx] = self._rpa_vertex(J_eff, _V_JT, chi_SS, chi_SQ, chi_QS, chi_QQ, _V_cap)
             V_spin_u[u_idx] = self._rpa_vertex(J_eff, 0.0,   chi_SS, chi_SQ, chi_QS, chi_QQ, _V_cap)
             V_jt_u[u_idx]   = self._rpa_vertex(0.0,   _V_JT, chi_SS, chi_SQ, chi_QS, chi_QQ, _V_cap)
@@ -1774,7 +1777,7 @@ class RMFT_Solver:
         J_A1g_diag, J_B1g_scalar = self._exchange_channels(Q, q_renorm)
         abs_delta = max(abs(target_doping), 1e-6)
         O_exp_z   = g_J * (1.0 - abs_delta) * M * self.sz_op / 2.0  # /2 factor due to the Mean-Field Weiss field related to one longitudinal spin
-        h_z = sign_M * (J_A1g_diag * O_exp_z)
+        h_z = sign_M * (J_A1g_diag * O_exp_z) * self.p.Z
 
         H[0, 0] -= h_z[0]   # 6↑
         H[1, 1] -= h_z[1]   # 6↓
@@ -1784,20 +1787,31 @@ class RMFT_Solver:
         # Transverse (off-diagonal) anomalous Weiss field from J_B1g: active only when Q≠0 AND condensate has F67s≠0.
         if abs(F67s_mf) > 1e-12:
             B1g_offdiag = self.B1g_op - np.diag(np.diag(self.B1g_op))
-            H -= sign_M * (J_B1g_scalar * F67s_mf) * B1g_offdiag
+            H -= sign_M * (self.p.Z * J_B1g_scalar * F67s_mf) * B1g_offdiag
 
         # 4. JT distortion: H_JT = g_JT · Q · B1g_op
         H += (self.p.g_JT * Q) * self.B1g_op
         return H
     
-    def _find_mu_for_density(self, M: float, Q: float, Delta_s: complex, Delta_d: complex, target_doping: float, tx: float, ty: float, mu_guess: float, g_J: float, q_renorm_cur: float, F67s_mf: float) -> Tuple[float, float]:
-        """Find chemical potential mu such that electron density n(mu) = 1 - target_doping. """
+    def _find_mu_for_density(self, M: float, Q: float, Delta_s: complex, Delta_d: complex, target_doping: float, tx: float, ty: float, mu_guess: float, g_J: float, q_renorm: float, F67s_mf: float) -> Tuple[float, float]:
+        """
+        Find the chemical potential μ such that the BdG electron density satisfies n(μ) = 1 − target_doping.
+        The cheap estimator: ∂n/∂μ ≈ Σₖ,ₙ wₖ f(Eₙ)[1−f(Eₙ)]/kT
+        is the standard BCS approximation. It effectively replaces the exact Hellmann–Feynman slope,
+          ∂Eₙ/∂μ = ⟨n|∂H/∂μ|n⟩ = −(Pₙ−Hₙ),  Pₙ+Hₙ=1,
+        by −1, assuming purely particle-like BdG states (Pₙ=1). This is exact only for Δ=0, where eigenstates are pure particle or hole branches.
+        For finite Δₛ or Δ_d, Bogoliubov mixing gives Pₙ≠1, so ∂Eₙ/∂μ = 1−2Pₙ ≠ −1,
+        and dn/dμ acquires additional eigenvector (Sternheimer-type) contributions omitted by the shortcut. Thus, once superconductivity is present, the analytic slope is only approximate: although μ enters H only through the diagonal −μτ_z term, the density's μ-dependence also reflects the evolving u/v coherence factors.
+        A plain Newton step can overshoot when the DOS—and hence ∂n/∂μ—changes rapidly (e.g. near a Van Hove singularity). Instead, each step is backtracked (halved) until |n(μ)−target_n| decreases. If backtracking fails, the routine switches to a numerical derivative; if convergence is still not achieved within the iteration budget,
+        it falls back to a guaranteed bracketed Brent solve rather than returning an unconverged μ.
+        """
         target_n = 1.0 - target_doping
         vbdg = self._get_vbdg()
+        _use_numeric_deriv = (abs(Delta_s) + abs(Delta_d)) > _MU_SC_DERIV_THRESH
 
         def _diag_and_density(mu_val: float) -> Tuple[np.ndarray, np.ndarray, float]:
             ev, ec = np.linalg.eigh(
-                vbdg._build_H_stack(vbdg._kpts, M, Q, Delta_s, Delta_d, target_doping, mu_val, tx, ty, g_J, q_renorm_cur, F67s_mf, out=vbdg._H_stack)
+                vbdg._build_H_stack(vbdg._kpts, M, Q, Delta_s, Delta_d, target_doping, mu_val, tx, ty, g_J, q_renorm, F67s_mf, out=vbdg._H_stack)
             )
             f = self.fermi_function(ev)
             fb = 1.0 - f
@@ -1806,65 +1820,103 @@ class RMFT_Solver:
             n = float(np.dot(self.k_weights, dens_A + dens_B)) / 4.0
             return ev, ec, n
 
-        def density_and_deriv(mu_val: float) -> Tuple[float, float]:
-            ev, ec, n = _diag_and_density(mu_val)
+        def _analytic_dn_dmu(ev: np.ndarray, ec: np.ndarray) -> float:
+            # ∂n/∂μ ≈ Σ_k (f(1-f)/kT) * (|u_A|²+|u_B|²+|v_A|²+|v_B|²) / 4 — exact only when every BdG branch is pure particle/hole (Δ=0); see docstring.
             f = self.fermi_function(ev)
             fb = 1.0 - f
             uA, uB, vA, vB = VectorizedBdG._get_nambu_spinors(ec)
-
-            # ∂n/∂μ = Σ_k (f(1-f)/kT) * (|u_A|²+|u_B|²+|v_A|²+|v_B|²) / 4
             df_dE = f * fb / self.kT
             w_A = np.sum(np.abs(uA)**2 + np.abs(vA)**2, axis=1)
             w_B = np.sum(np.abs(uB)**2 + np.abs(vB)**2, axis=1)
-            dn_dmu = float(np.einsum('k,kn,kn->', self.k_weights, df_dE, w_A + w_B)) / 4.0
-            return n - target_n, dn_dmu
+            return float(np.einsum('k,kn,kn->', self.k_weights, df_dE, w_A + w_B)) / 4.0
+
+        def _numeric_dn_dmu(mu_val: float) -> float:
+            # Centred finite difference of the FULL n(μ) (coherence factors included): captures both the (1−2P_n) Hellmann–Feynman correction and the eigenvector response that the analytic estimator misses. Costs two extra diagonalisations.
+            h = max(1e-5, 1e-4 * self.p.t0)
+            _, _, n_p = _diag_and_density(mu_val + h)
+            _, _, n_m = _diag_and_density(mu_val - h)
+            return (n_p - n_m) / (2.0 * h)
 
         def density_error(mu_val: float) -> float:
             _, _, n = _diag_and_density(mu_val)
             return n - target_n
 
+        def _bracket_and_brent(mu_center: float) -> Optional[float]:
+            """Guaranteed-convergence fallback: expand a bracket around mu_center until the sign
+            of density_error flips (n(μ) is monotonic in μ at fixed M,Q,Δ), then Brent."""
+            w = 6.0 * self.p.t0
+            mu_min, mu_max = mu_center - w, mu_center + w
+            err_min, err_max = density_error(mu_min), density_error(mu_max)
+            for _ in range(10):
+                if err_min * err_max <= 0.0:
+                    return brentq(density_error, mu_min, mu_max, xtol=_BRENTQ_TOL)
+                if err_min > 0.0:
+                    mu_min -= w
+                    err_min = density_error(mu_min)
+                else:
+                    mu_max += w
+                    err_max = density_error(mu_max)
+            return None
+
         mu = mu_guess
         n_at_mu = target_n
+        err = 0.0
 
-        # Newton-Raphson with Brentq fallback
-        for _ in range(20):
-            err, deriv = density_and_deriv(mu)
-            n_at_mu = err + target_n
+        for _ in range(_MU_NEWTON_MAXIT):
+            ev, ec, n = _diag_and_density(mu)
+            err = n - target_n
+            n_at_mu = n
 
-            if abs(err) < 1e-6:
+            if abs(err) < _MU_DENSITY_TOL:
                 return mu, n_at_mu
 
+            deriv = _numeric_dn_dmu(mu) if _use_numeric_deriv else _analytic_dn_dmu(ev, ec)
+
             if abs(deriv) < _DEN_DERIV_FLOOR:
-                # Flat region: fall back to Brentq
-                w = 6.0 * self.p.t0
-                mu_min = mu - w
-                mu_max = mu + w
-                err_min = density_error(mu_min)
-                err_max = density_error(mu_max)
+                mu_root = _bracket_and_brent(mu)
+                if mu_root is not None:
+                    return mu_root, density_error(mu_root) + target_n
+                continue   # genuinely degenerate derivative; let the next pass re-evaluate
 
-                # Expand bracket until sign change found
-                for _ in range(10):
-                    if err_min * err_max <= 0.0:
-                        break
-                    if err_min > 0.0:
-                        mu_min -= w
-                        err_min = density_error(mu_min)
-                    else:
-                        mu_max += w
-                        err_max = density_error(mu_max)
+            raw_step = float(np.clip(err / deriv, -self.p.t0, self.p.t0))
 
-                if err_min * err_max <= 0.0:
-                    mu = brentq(density_error, mu_min, mu_max, xtol=_BRENTQ_TOL)
-                    n_at_mu = density_error(mu) + target_n   # Re-evaluate n at the converged mu
-                    return mu, n_at_mu
-                # If Brentq didn't converge, continue with Newton
+            # Backtracking/damped Newton: protects against Van Hove-induced overshoot
+            eta = 1.0
+            mu_trial = mu - eta * raw_step
+            err_trial = density_error(mu_trial)
+            _bt = 0
+            while abs(err_trial) >= abs(err) and eta > _MU_BACKTRACK_FLOOR and _bt < _MU_BACKTRACK_MAX:
+                eta *= 0.5
+                mu_trial = mu - eta * raw_step
+                err_trial = density_error(mu_trial)
+                _bt += 1
+
+            if abs(err_trial) >= abs(err):
+                # Backtracking exhausted with no improvement: the local derivative estimate
+                # (analytic or numeric) is unreliable here — escalate to the numeric derivative
+                # and retry from the same μ rather than accepting a non-improving step.
+                _use_numeric_deriv = True
                 continue
-            step = float(np.clip(err / max(abs(deriv), 1e-10), -self.p.t0, self.p.t0))
-            mu -= step
-        # If we exit the loop without convergence, return the best estimate
+
+            mu = mu_trial
+            n_at_mu = err_trial + target_n
+
+        if abs(n_at_mu - target_n) >= _MU_DENSITY_TOL:
+            mu_root = _bracket_and_brent(mu)
+            if mu_root is not None:
+                mu = mu_root
+                n_at_mu = density_error(mu) + target_n
+            else:
+                warnings.warn(
+                    f"_find_mu_for_density: failed to bracket the density root after "
+                    f"{_MU_NEWTON_MAXIT} Newton iterations (M={M:.4f}, Q={Q:.4f}, "
+                    f"|Δ|={abs(Delta_s)+abs(Delta_d):.4f}); returning best estimate "
+                    f"μ={mu:.6f} with |n−target|={abs(n_at_mu-target_n):.2e}.",
+                    RuntimeWarning,
+                )
         return mu, n_at_mu
 
-    def compute_bdg_free_energy(self, M: float, Q: float, Delta_s: complex, Delta_d: complex, target_doping: float, mu: float, tx: float, ty: float, g_J: float, V_s: float, V_d: float, K_eff_for_free_energy: float, ev_all: np.ndarray) -> float:
+    def compute_bdg_free_energy(self, M: float, Q: float, Delta_s: complex, Delta_d: complex, target_doping: float, mu: float, tx: float, ty: float, g_J: float, g_s: float, g_d: float, V_s: float, V_d: float, K_eff_for_free_energy: float, ev_all: np.ndarray) -> float:
         """
         Grand potential per site computed from the k-space BdG spectrum.
 
@@ -1893,10 +1945,8 @@ class RMFT_Solver:
         # Elastic energy uses the full effective spring constant (K_eff = K_lattice + ∂²F_ex/∂Q²).
         elastic_energy = 0.5 * K_eff_for_free_energy * Q**2
 
-        # Condensation correction: |Δ_ℓ|² / (g_ℓ · V_ℓ)
-        _, _, g_s, g_d = self.p.get_gutzwiller_factors(target_doping)
-
         condensation = 0.0
+        # Condensation correction: |Δ_ℓ|² / (g_ℓ · V_ℓ)
         if V_s > 0.0:
             condensation += abs(Delta_s)**2 / (g_s * V_s)
         if V_d > 0.0:
@@ -1913,7 +1963,7 @@ class RMFT_Solver:
 
             H = H_A⊗I + I⊗H_B                  [local SP + AFM Weiss + JT + F67s_mf]
               + J_bond_M_bare·(O_A⊗O_B)         [A1g magnetic exchange]
-              + J_bond_Q_bare·(B1g_A⊗B1g_B)    [B1g orbital exchange, Q≠0 only]
+              + J_B1g_bare·(B1g_A⊗B1g_B)    [B1g orbital exchange, Q≠0 only]
 
         local BDG Hamiltonian already contains: −μ, Δ_CF, AFM Weiss (J_A1g·sign_M·M), JT (g_JT·Q·B1g),
         and the anomalous Weiss field (J_B1g·F67s_mf, Q≠0 only).
@@ -1936,10 +1986,10 @@ class RMFT_Solver:
         so the MQ contribution is accepted or rejected by its own significance.
 
         Slopes give:
-            J_Q  → SC-induced B1g exchange    (q_renorm  = J_Q  / J_bond_M_bare)
-            J_MQ → spin–JT cross-coupling     (r_MQ_cur= J_MQ / J_bond_M_bare)
+            J_Q  → SC-induced B1g exchange    (q_renorm = J_Q  / J_B1g_bare)
+            J_MQ → spin–JT cross-coupling     (r_MQ     = J_MQ / sqrt(J_bond_M_bare·J_B1g_bare))
         
-        The J_bond_Q_bare·(B1g_A⊗B1g_B) exchange term is included when Q≠0: in the SC state the Bogoliubov mixing activates χ_SQ,
+        The J_B1g_bare·(B1g_A⊗B1g_B) exchange term is included when Q≠0: in the SC state the Bogoliubov mixing activates χ_SQ,
         making this channel physically active even though it vanishes in the normal state by symmetry. Omitting it would introduce a systematic bias in J_Q_fit.
         """
         I4 = np.eye(4, dtype=complex)
@@ -1949,26 +1999,16 @@ class RMFT_Solver:
         H_B = self.build_local_hamiltonian_for_bdg(-1.0, M_ext, Q, mu, g_J, q_renorm, F67s_mf, doping, tx_bare, ty_bare)
 
         # ── 2. Bare exchange couplings (single bond, no Z) ───────────────────────
-        # Magnetic A1g channel: Gutzwiller-renormalised (ZSA CT + kinematic dd)
-        J_bond_M_bare = self.p.effective_superexchange(g_J, tx_bare, ty_bare, doping)
+        _, J_B1g_bare = self._exchange_channels(Q, 0.0)
 
-        # Orbital B1g channel: bare ZSA exchange, Q-activated via sinh(2Q/λ)·η_J
-        lam   = max(self.p.lambda_hop, 1e-9)
-        e_p   = np.exp(+Q / lam)
-        e_m   = np.exp(-Q / lam)
-        _jxz  = e_p ** 2
-        _jyz  = e_m ** 2
-        _jxy  = 0.5 * (_jxz + _jyz)
-        _J6   = self.p._w6_xz * _jxz + self.p._w6_yz * _jyz + self.p._w6_xy * _jxy
-        _J7   = self.p._w7_xz * _jxz + self.p._w7_yz * _jyz + self.p._w7_xy * _jxy
-        eta_J = float(np.sqrt(max(_J7 / max(_J6, 1e-9), 0.0)))
-        J_bond_Q_bare = self.p.J_CT * float(np.sinh(2.0*Q/lam)) * eta_J
+        # J_bond_M_bare: single-bond A1g magnetic exchange (Gutzwiller-renormalised, no Z factor here)
+        J_bond_M_bare = self.p.effective_superexchange(g_J, tx_bare, ty_bare, doping)
 
         # ── 3. Magnetic and orbital exchange ─────────────────────────────────────
         H_exch = J_bond_M_bare * np.kron(self.multi_op, self.multi_op)
         if abs(Q) > 1e-8:
             # B1g orbital exchange: active in the SC state because Bogoliubov mixing opens χ_SQ (Section 11); omitting it biases J_Q_fit.
-            H_exch += J_bond_Q_bare * np.kron(self.B1g_op, self.B1g_op)
+            H_exch += J_B1g_bare * np.kron(self.B1g_op, self.B1g_op)
 
         # ── 4. Full cluster Hamiltonian ───────────────────────────────────────────
         H_cluster = np.kron(H_A, I4) + np.kron(I4, H_B) + H_exch
@@ -2003,7 +2043,7 @@ class RMFT_Solver:
         evals_int = evals.copy()
         evals_int -= J_bond_M_bare * oA * oB
         if abs(Q) > 1e-8:
-            evals_int -= J_bond_Q_bare * bA * bB
+            evals_int -= J_B1g_bare * bA * bB
 
         # ── 9. Fit temperature and Boltzmann weights ──────────────────────────────
         # T_floor: at least 2×kT and 15% of kinetic scale to prevent a single near-degenerate state from dominating the regression (see _T_floor analysis).
@@ -2067,11 +2107,16 @@ class RMFT_Solver:
                     pass
 
         # ── 11. Renormalisation factors ────────────────────────────────────────────
-        M_bare = max(abs(J_bond_M_bare), _REGR_EPS)
+        # Normalise by J_B1g_bare (the single-bond B1g bare coupling) so that r_Q is dimensionless and directly maps to the (1+r_Q) factor:
+        #   J_B1g_eff = Z · J_CT · sinh(2Q/λ) · η_J · (1 + r_Q)
+        #             = J_B1g_bare · (1 + r_Q)
+        # This is internally consistent: evals_int has J_B1g_bare·B1g⊗B1g subtracted, the regression slope J_Q carries units of energy/[B1g²]
+        Q_bare_scale = max(abs(J_B1g_bare), _REGR_EPS)
+        M_bare       = max(abs(J_bond_M_bare), _REGR_EPS)
 
-        # Q and MQ channels normalised by M_bare (the analytic single-bond exchange scale).
-        r_Q  = J_Q  / M_bare
-        r_MQ = J_MQ / M_bare
+        r_Q  = J_Q  / Q_bare_scale
+        # r_MQ couples the spin (O) and orbital (B1g) channels; normalised by the geometric mean √(M_bare · Q_bare_scale) so both channels contribute equally to the scale.
+        r_MQ = J_MQ / max(np.sqrt(M_bare * Q_bare_scale), _REGR_EPS)
 
         r_Q  = float(np.clip(r_Q,  -2.0, 2.0))
         r_MQ = float(np.clip(r_MQ, -2.0, 2.0))
@@ -2185,14 +2230,14 @@ class RMFT_Solver:
         ty = g_t * ty_bare
 
         # --- Linearised BdG+RPA eigenproblem ---
-        _lin_seed = self.solve_linearized_gap_equation(initial_M, initial_Q, 0.0j, 0.0j, target_doping, target_doping, mu, tx, ty, g_J, g_t, self._K_bare, J_eff_scalar)
+        _lin_seed = self.solve_linearized_gap_equation(initial_M, initial_Q, 0.0j, 0.0j, target_doping, target_doping, mu, tx, ty, g_t, g_J, self._K_bare, J_eff_scalar)
         lambda_lin_max = float(_lin_seed['lambda_lin_max'])
 
         # --- Get physically motivated M estimate for χ_τ calculation ---
         _M_phys = self.p.estimate_M0(target_doping, lambda_lin_max)
 
         # --- Normal-state χ_τ (Magnitude of softening) ---
-        chi_tau_raw = self._compute_chi_tau(_M_phys, initial_Q, 0.0+0j, 0.0+0j, target_doping, mu, tx, ty, g_t, g_J)['chi_tau_n']
+        chi_tau_raw = self._compute_chi_tau(_M_phys, initial_Q, 0.0+0j, 0.0+0j, target_doping, mu, tx, ty, g_t, g_J, 0.0)['chi_tau_n']
         chi_tau_val = max(-chi_tau_raw, 0.0) if chi_tau_raw < -1e-6 else 0.0
 
         # --- linearized Jacobian elements ---
@@ -2339,14 +2384,14 @@ class RMFT_Solver:
             V_unique = np.empty(len(unique_q))
             _Gamma_M, _V_JT, _V_cap = self._make_vertex_params(target_doping, tx_v, ty_v, g_t, J_eff_v, K_eff)
             for u, q_u in enumerate(unique_q):
-                chi_SS, chi_SQ, chi_QS, chi_QQ, _ = self.get_susceptibilities_normal(q_u, M, Qv, target_doping, _Gamma_M, mu, tx_v, ty_v, g_J, chi_QQ_bare, max(K_eff, 1e-9), J_eff_v, chi_SQ_sc, r_MQ_cur, E_k_cache, _enforce_c4=False)
+                chi_SS, chi_SQ, chi_QS, chi_QQ = self.get_susceptibilities_normal(q_u, M, Qv, target_doping, _Gamma_M, mu, tx_v, ty_v, g_J, chi_QQ_bare, max(K_eff, 1e-9), J_eff_v, chi_SQ_sc, r_MQ_cur, E_k_cache, _enforce_c4=False)
                 V_unique[u] = self._rpa_vertex(J_eff_v, _V_JT, chi_SS, chi_SQ, chi_QS, chi_QQ, _V_cap)
 
             V_ij_full = np.zeros((len(_pts), len(_pts)))
             V_ij_full[i_idx, j_idx] = V_unique[inv_idx]
             V_ij_full = 0.5 * (V_ij_full + V_ij_full.T)
 
-            lin = self.solve_linearized_gap_equation(M, Qv, Delta_s, Delta_d, target_doping, target_doping, mu, tx_v, ty_v, g_J, g_t, max(K_eff, 1e-9), J_eff_v, chi_SQ_sc, r_MQ_cur, _fs_precomputed=(_pts, _vF))
+            lin = self.solve_linearized_gap_equation(M, Qv, Delta_s, Delta_d, target_doping, target_doping, mu, tx_v, ty_v, g_t, g_J, max(K_eff, 1e-9), J_eff_v, chi_SQ_sc, r_MQ_cur, _fs_precomputed=(_pts, _vF))
             return float(lin['lambda_lin_max']), np.diag(V_ij_full), _pts
 
         # Adaptive step size: at higher Q, the 5% fraction protects against numerical noise and asymmetric lattice deformation.
@@ -2434,14 +2479,18 @@ class RMFT_Solver:
              is mixed in with weight _ALPHA_MIX_2X2, preventing artificial channel locking.
           5. Cluster ED → q_renorm, r_MQ (EMA-smoothed) for JT-sector vertex renormalisation;
              J_eff itself comes directly from the analytic Gutzwiller factor each iteration.
-          6. Newton step for M (LM-damped, trust-region); blend with BdG fixpoint.
+          6. Newton step for M (LM-damped, trust-region); blended with the *linearly*-mixed BdG
+             fixpoint M_bdg (M is deliberately kept OUT of the Anderson history — see step 8).
           7. Adaptive Q update via Hellmann-Feynman: Q_out_raw = −(g_JT/K_eff)·⟨B₁g⟩
              Injected into the Anderson vector when |Q_out_raw − Q| > _Q_THR_REL·λ_hop,
              OR on iteration 0, OR every _Q_UPDATE_PERIOD iterations (safety heartbeat).
              When not injected, Q_out = Q (Anderson residual zero → mixer leaves Q untouched),
              consistent with the adiabatic lattice timescale. α is capped at _MIXING×0.3 when
              a genuine Q displacement is injected.
-          8. Anderson(5) mix (M, Q, |Δ_s|, |Δ_d|); find μ enforcing density.
+          8. Anderson(5) mix on (Q, |Δ_s|, |Δ_d|) μ enforcing density is then re-solved at the freshly
+             mixed (M,Q,Δ) μ is exactly profiled out as a slave variable at every accepted (M,Q,Δ) point
+             rather than being an extra, imperfectly converged "fast" degree of freedom whose residual
+             error could otherwise leak into the (Q,Δ_s,Δ_d) Anderson history from one iteration to the next.
           9. Adaptive α via Λ_inst = EMA[max(λ_pair, λ_JT, J·χ_SS)]:
              α_eff = α₀/(1+Λ); halved + history reset on divergence;
              past-QCP (det<0): exponential penalty on α; near-QCP: hard cap.
@@ -2464,6 +2513,7 @@ class RMFT_Solver:
         mu += 0.5 * self.p.Delta_CF
 
         g_t, g_J, g_Delta_s, g_Delta_d = self.p.get_gutzwiller_factors(target_doping)
+        _t_eff_now = g_t * self.p.t0
         kick = self._scf_jacobi_kick(target_doping, initial_M, initial_Q, initial_Delta, g_t, g_J, max(g_Delta_s, g_Delta_d), mu, force_d_wave)
 
         M = kick['M_kick']
@@ -2496,7 +2546,6 @@ class RMFT_Solver:
         scf_f_hist: list = []
 
         _vertex_cache: Optional[dict] = None
-        _hk              = None
         _K_eff_last_M    = initial_M + 999.0
         _K_eff_last_iter = -5
         _K_eff_last_Q    = initial_Q + 999.0
@@ -2518,9 +2567,9 @@ class RMFT_Solver:
         _chi_SS_sc    = 0.0
         _chi_SQ_sc    = 0.0
         _F67s_mf      = 0.0
-        _q_renorm_cur = 1.0    # orbital vertex renormalization
-        _r_MQ_cur     = 1.0    # cross vertex renormalization
-        F_cluster     = {'F_per_site': 0.0, 'q_renorm': 1.0}
+        _q_renorm_cur = 0.0    # orbital vertex renormalization
+        _r_MQ_cur     = 0.0    # cross vertex renormalization
+        F_cluster     = {'F_per_site': 0.0, 'q_renorm': 0.0}
         _det_q0       = _DET_AFM_FLOOR
         _det_afm      = _DET_AFM_FLOOR
         _det_q0_last_valid  = _DET_AFM_FLOOR   # last finite det value; survives cache invalidation
@@ -2567,7 +2616,7 @@ class RMFT_Solver:
                 or abs(Q - _K_eff_last_Q) > _Q_THR_REL * self.p.lambda_hop
             )
             if _K_eff_update_needed:
-                _rigidity        = self.compute_JT_rigidity_from_exchange(M, Q, mu, g_J, target_doping, g_t, _q_renorm_cur)
+                _rigidity        = self.compute_JT_rigidity_from_exchange(M, Q, mu, g_t, g_J, target_doping, _q_renorm_cur)
                 _K_eff_scf       = max(_rigidity['K_eff'], _MATH_EPS)
                 _K_eff_last_M    = M
                 _K_eff_last_Q    = Q
@@ -2575,7 +2624,7 @@ class RMFT_Solver:
                 _B1g_normal      = self.B1g_expectation(self._get_chi0_norm_cache(M, 0.0, mu, tx, ty, g_J, _vbdg, target_doping)) if self.p.Delta_inplane > 0.0 else 0.0
             
             # Gap equation: V(q) always from Δ=0 χ₀; BdG amplitudes (u,v) from SC state.
-            Delta_s_out, Delta_d_out, _v_s, _v_d, _vertex_cache = _vbdg.compute_gap_eq_vectorized(M, Q, Delta_s, Delta_d, target_doping, mu, tx, ty, g_J, g_t, _K_eff_scf, g_Delta_s, g_Delta_d, _chi_SQ_sc, _r_MQ_cur, _solve_state, _bdg_ev_sc, _bdg_ec_sc, _vertex_cache)
+            Delta_s_out, Delta_d_out, _v_s, _v_d, _vertex_cache = _vbdg.compute_gap_eq_vectorized(M, Q, Delta_s, Delta_d, target_doping, mu, tx, ty, g_t, g_J, g_Delta_s, g_Delta_d, _K_eff_scf, _chi_SQ_sc, _r_MQ_cur, _solve_state, _bdg_ev_sc, _bdg_ec_sc, _vertex_cache)
 
             # 2×2 kernel K_pair captures s/d channel coupling; dominant eigenvector gives optimal Δ_s/Δ_d ratio.
             _det_afm = _vertex_cache['det_afm'] if _vertex_cache else _DET_AFM_FLOOR
@@ -2620,37 +2669,37 @@ class RMFT_Solver:
             Delta_s_mixed = self._mix(Delta_s, Delta_s_out, alpha=_alpha)
             Delta_d_mixed = self._mix(Delta_d, Delta_d_out, alpha=_alpha)
 
-            # 4D Anderson vector: (M, Q/λ_hop, |Δ_s|/t₀, |Δ_d|/t₀): scaled for balanced Jacobian solve.
-            x_in_4d  = np.array([M,     Q / self.p.lambda_hop,     abs(Delta_s) / self.p.t0,       abs(Delta_d) / self.p.t0])
-            x_out_4d = np.array([M_bdg, Q_out / self.p.lambda_hop, abs(Delta_s_mixed) / self.p.t0, abs(Delta_d_mixed) / self.p.t0])
-            scf_x_hist.append(x_in_4d)
-            scf_f_hist.append(x_out_4d)
-            x_new_4d = self._anderson_mix(scf_x_hist, scf_f_hist, m=5, alpha=_alpha)
+            # 3D Anderson vector: (Q/λ_hop, |Δ_s|/t₀, |Δ_d|/t₀) — scaled to O(1) for a balanced least-squares solve.
+            x_in_3d  = np.array([Q / self.p.lambda_hop,     abs(Delta_s) / self.p.t0,       abs(Delta_d) / self.p.t0])
+            x_out_3d = np.array([Q_out / self.p.lambda_hop, abs(Delta_s_mixed) / self.p.t0, abs(Delta_d_mixed) / self.p.t0])
+            scf_x_hist.append(x_in_3d)
+            scf_f_hist.append(x_out_3d)
+            x_new_3d = self._anderson_mix(scf_x_hist, scf_f_hist, m=5, alpha=_alpha)
 
             # Anderson updates |Δ| magnitude; phase kept from linear mix (BdG phase convention).
-            Delta_s_mixed = complex(float(np.clip(x_new_4d[2] * self.p.t0, 0.0, 1.0))) * Delta_s_mixed / (abs(Delta_s_mixed) + 1e-30)
-            Delta_d_mixed = complex(float(np.clip(x_new_4d[3] * self.p.t0, 0.0, 1.0))) * Delta_d_mixed / (abs(Delta_d_mixed) + 1e-30)
+            Delta_s_mixed = complex(float(np.clip(x_new_3d[1] * self.p.t0, 0.0, 1.0))) * Delta_s_mixed / (abs(Delta_s_mixed) + 1e-30)
+            Delta_d_mixed = complex(float(np.clip(x_new_3d[2] * self.p.t0, 0.0, 1.0))) * Delta_d_mixed / (abs(Delta_d_mixed) + 1e-30)
             Delta_s_abs = abs(Delta_s_mixed)
             Delta_d_abs = abs(Delta_d_mixed)                        
             _delta_run_hist.append(Delta_s_abs + Delta_d_abs)   # track |Δ| run history for limit-cycle detection.
             dF_dM_0, d2F_dM2 = self.compute_dF_dM_and_d2F(M, Q, Delta_s_mixed, Delta_d_mixed, target_doping, mu, tx, ty, g_J, _F67s_mf, _q_renorm_cur, _bdg_ev_sc, _bdg_ec_sc)
 
             # Adaptive LM floor
-            if _hk is not None:
-                _lmin_abs = max(abs(_hk['eigenvalues'][0]), 1e-12)
-                _mu_LM_eff = _MU_LM * max(2.0, 0.1 / _lmin_abs)
+            #   d2F_dM2 >> 0  (deep stable minimum) → μ_LM small  → fast, lightly-damped Newton step
+            #   d2F_dM2 ≈ 0   (flat / near AFM QCP)  → μ_LM = _MU_LM → cautious step, dominated by 1/μ_LM
+            #   d2F_dM2 < 0   (saddle / unstable)    → μ_LM = |d2F_dM2| + _MU_LM → guarantees (H+μ) > 0
+            if d2F_dM2 > _MATH_EPS:
+                _mu_LM_eff = max(_MU_LM / (1.0 + d2F_dM2 / _t_eff_now), _MU_LM * 0.1)
+            elif d2F_dM2 < -_MATH_EPS:
+                _mu_LM_eff = abs(d2F_dM2) + _MU_LM
             else:
-                _mu_LM_eff = _MU_LM / (1.0 + (Delta_s_abs + Delta_d_abs) / max(self.p.t0 / 10, 1e-9))   # reduce overdamping when Δ grows (SC–AFM coupling unfreezes).
+                _mu_LM_eff = _MU_LM / (1.0 + (Delta_s_abs + Delta_d_abs) / (2*self.p.t0))  # reduce overdamping when Δ grows (SC–AFM coupling unfreezes).
 
-            # LM Newton for M: denom = max(H, 0) + μ_LM, where H = d²F/dM².
-            #   H > 0 (stable minimum)  → Newton step + small regularisation → fast convergence
-            #   H <= 0 (inflection / saddle / QCP)    → max(H,0)=0 → pure gradient step (1/μ_LM)
-            _lm_denom = max(d2F_dM2, 0.0) + _mu_LM_eff
-
+            # LM Newton for M
+            _lm_denom = d2F_dM2 + _mu_LM_eff
             # Trust-region for |ΔM|.
             # Upper cap: J/t-adaptive (large J/t → steeper free-energy surface → smaller cap),
             #   then tightened by curvature: flat d²F/dM² (near QCP) → halve the cap to keep LM and TR coherent.
-            _t_eff_now     = g_t * self.p.t0
             _ratio_Jt      = abs(_J_eff_now) / max(_t_eff_now, 1e-6)
             _step_upper_Jt = float(np.clip(_TR_M_STEP_MAX / max(1.0, _ratio_Jt / 2.0), _TR_M_STEP_MIN_FLOOR * 3, _TR_M_STEP_MAX))
             _curv_scale    = max(d2F_dM2, 0.0) / max(_lm_denom, 1e-9)   # ∈ [0,1]
@@ -2660,9 +2709,10 @@ class RMFT_Solver:
             _step_floor    = max(_M_STEP_FLOOR_REL * max(abs(M), _M_STEP_FLOOR_M_MIN), _M_STEP_FLOOR_ABS)
             _step_limit    = float(np.clip(max(self.kT, 0.05 * _t_eff_now) / _j_eff_floor, _step_floor, _step_upper))
             M_newton       = float(np.clip(M + np.clip(-dF_dM_0 / _lm_denom, -_step_limit, _step_limit), 0.0, 1.0))
-            # Blend: Anderson fixpoint (BdG ⟨S_z⟩) with Newton correction.
-            M_mixed        = float(np.clip((1.0 - _ALPHA_HF) * x_new_4d[0] + _ALPHA_HF * M_newton, 0.0, 1.0))
-            Q_mixed        = float(np.clip(x_new_4d[1] * self.p.lambda_hop, -0.5 * self.p.lambda_hop, 0.5 * self.p.lambda_hop))
+            # Blend: *linearly*-mixed BdG fixpoint (⟨S_z⟩) with Newton correction.
+            M_fixpoint     = self._mix(M, M_bdg, alpha=_alpha)
+            M_mixed        = float(np.clip((1.0 - _ALPHA_HF) * M_fixpoint + _ALPHA_HF * M_newton, 0.0, 1.0))
+            Q_mixed        = float(np.clip(x_new_3d[0] * self.p.lambda_hop, -0.5 * self.p.lambda_hop, 0.5 * self.p.lambda_hop))
 
             # _vertex_cache may be None after a Q sign-flip reset.
             _V_s_now = _vertex_cache['V_s_scalar'] if _vertex_cache is not None else 0.0
@@ -2845,7 +2895,7 @@ class RMFT_Solver:
                     _v_afm = _vertex_cache.get('V_afm_mean', float('nan'))
                     _v_fwd = _vertex_cache.get('V_fwd_mean', float('nan'))
                     _v_neg = _vertex_cache.get('V_neg_frac', float('nan'))
-                    _Gamma_M_eff = _vertex_cache.get('Gamma_M_eff', float('nan'))
+                    _Gamma_M = _vertex_cache.get('Gamma_M', float('nan'))
                     _vmat_flags += (f" [V_afm={_v_afm:.3f} V_fwd={_v_fwd:.3f} neg={_v_neg:.2f}]")
                 
                 _scf_log("SCF", f"δ={target_doping:.2f} {iteration+1:3d}/{_MAX_ITER}"
@@ -2854,7 +2904,7 @@ class RMFT_Solver:
                         f"  J_eff={_J_eff_now:.4f} eV  q_renorm={_q_renorm_cur:.4f}  r_MQ={_r_MQ_cur:.4f}  mu={mu_new:.5f}"
                         f"  dFM={_det_q0:.3f}  dAFM={_det_afm:.3f}  χ_SQ_sc={_chi_SQ_sc:.4f} "
                         f"  V_s={_V_s_now:.3f} V_d={_V_d_now:.3f}{_vmat_flags}"
-                        f"  Γ_M={_Gamma_M_eff*1000:.2f}meV  α={_alpha:.4f}"
+                        f"  Γ_M={_Gamma_M*1000:.2f}meV  α={_alpha:.4f}"
                         f"  B1g={_B1g_exp:+.4f}  F67s={_F67s_mf:+.4f}"
                         f"  [{_regime}]  {_iter_s:3.0f}s/it")
 
@@ -2876,7 +2926,7 @@ class RMFT_Solver:
                     V_s = self.p.g_JT**2 / max(self._K_bare, 1e-9)
                     V_d = V_s
 
-                _hk = self.compute_hessian(M, Q, Delta_s, Delta_d, target_doping, mu, g_t, g_J, _q_renorm_cur, _F67s_mf, V_s, V_d, max(self._K_bare, 1e-9))
+                _hk = self.compute_hessian(M, Q, Delta_s, Delta_d, target_doping, mu, g_t, g_J, g_Delta_s, g_Delta_d, _q_renorm_cur, _F67s_mf, V_s, V_d, max(self._K_bare, 1e-9))
                 
                 _lmin_k = float(_hk['eigenvalues'][0])
                 if np.isfinite(_lmin_k) and _lmin_k < 0:
@@ -2958,14 +3008,14 @@ class RMFT_Solver:
         # Post-loop diagnostic: λ_max and Rayleigh JT projection and store converged gap and distortion
         _J_eff_lin = self.p.Z * self.p.effective_superexchange(g_J, tx_mixed_bare, ty_mixed_bare, target_doping)
         _actual_doping = float(1.0 - n_kspace_new)
-        _lin: Dict = self.solve_linearized_gap_equation(M, Q, Delta_s, Delta_d, target_doping, _actual_doping, mu, tx_mixed, ty_mixed, g_J, g_t, _K_eff_scf, _J_eff_lin, _chi_SQ_sc, _r_MQ_cur)
+        _lin: Dict = self.solve_linearized_gap_equation(M, Q, Delta_s, Delta_d, target_doping, _actual_doping, mu, tx_mixed, ty_mixed, g_t, g_J, _K_eff_scf, _J_eff_lin, _chi_SQ_sc, _r_MQ_cur)
         self._last_Delta_s = Delta_s
         self._last_Delta_d = Delta_d
         self._last_Q       = Q
         
         if converged:
             hessian_result = self.compute_hessian(
-                M, Q, Delta_s, Delta_d, target_doping, mu, g_t, g_J, _q_renorm_cur, _F67s_mf, 
+                M, Q, Delta_s, Delta_d, target_doping, mu, g_t, g_J, g_Delta_s, g_Delta_d, _q_renorm_cur, _F67s_mf, 
                 _vertex_cache['V_s_scalar'] if _vertex_cache is not None else 0.0,
                 _vertex_cache['V_d_scalar'] if _vertex_cache is not None else 0.0,
                 _K_eff_scf)
@@ -2975,9 +3025,9 @@ class RMFT_Solver:
         _chi_tau_result  = self._compute_chi_tau(M, Q, Delta_s, Delta_d, target_doping, mu, tx_mixed, ty_mixed, g_t, g_J, _q_renorm_cur, _F67s_mf)
 
         # ── Normal-state K_eff reference (Δ=0) for gap-induced lattice-effect log
-        _rigidity_sc = self.compute_JT_rigidity_from_exchange(M, Q, mu, g_J, target_doping, g_t, _q_renorm_cur)
+        _rigidity_sc = self.compute_JT_rigidity_from_exchange(M, Q, mu, g_t, g_J, target_doping, _q_renorm_cur)
         # Δ=0 rigidity: run at Q=0 (AFM-ordered, no distortion, no condensate)
-        _rigidity_n  = self.compute_JT_rigidity_from_exchange(M, 0.0, mu, g_J, target_doping, g_t, _q_renorm_cur)
+        _rigidity_n  = self.compute_JT_rigidity_from_exchange(M, 0.0, mu, g_t, g_J, target_doping, _q_renorm_cur)
 
         # FS-resolved ∂λ_pair/∂Q and hot-spot kernel: positive → condensate strengthens pairing
         # Per-FS-point ∂V(k,k)/∂Q locates the hot spots where the effect is concentrated;
@@ -3243,10 +3293,8 @@ class RMFT_Solver:
         dX = np.diff(X, axis=0)
         r_last = R[-1]
 
-        # Component scaling: prevent M and Q from dominating (scale Q by 1/lambda_hop).
+        # Component scaling
         scale = np.ones_like(x_last)
-        if len(scale) >= 2:
-            scale[1] = 1.0 / max(self.p.lambda_hop, _MATH_EPS)
 
         dX_scaled = dX * scale           # shape (n-1, d)
         dR_scaled = dR * scale           # shape (n-1, d)
@@ -3270,7 +3318,6 @@ class RMFT_Solver:
             return x_simple
 
         # Canonical Anderson update fully in scaled space, then unscale.
-        # x_new_scaled = x_last_scaled + r_scaled - (dX_scaled + dR_scaled)ᵀ θ
         correction_scaled = (dX_scaled + dR_scaled).T @ theta
         x_opt_scaled = x_last_scaled + r_scaled - correction_scaled
         x_opt = x_opt_scaled / scale
@@ -3318,7 +3365,7 @@ class RMFT_Solver:
         # but its Weiss field (F67s_mf) must be included in the full H so eigenvectors ec carry the correct inter-band matrix elements for the Kubo term2.
         O_exp_unit = g_J * f_d * self.sz_op / 2.0
         J_A1g_diag, _ = self._exchange_channels(Q, q_renorm)
-        h_J_unit = J_A1g_diag * O_exp_unit   # element-wise: diagonal ∂H/∂M
+        h_J_unit = J_A1g_diag * O_exp_unit * self.p.Z   # element-wise: diagonal ∂H/∂M
         
         dH_diag = np.array([
             -h_J_unit[0], -h_J_unit[1], -h_J_unit[2], -h_J_unit[3],   # particle A  (sign_M=+1)
@@ -3347,7 +3394,7 @@ class RMFT_Solver:
         d2F = (term1 + term2) / 2.0
         return grad, d2F
 
-    def compute_hessian(self, M: float, Q: float, Delta_s: complex, Delta_d: complex, target_doping: float, mu: float, g_t: float, g_J: float, q_renorm: float, F67s_mf: float, V_s: float, V_d: float, K_eff_for_free_energy: float) -> Dict:
+    def compute_hessian(self, M: float, Q: float, Delta_s: complex, Delta_d: complex, target_doping: float, mu: float, g_t: float, g_J: float, g_s: float, g_d: float, q_renorm: float, F67s_mf: float, V_s: float, V_d: float, K_eff_for_free_energy: float) -> Dict:
         """ 3×3 finite-difference Hessian of F(M,Q,Δ).
         V_s / V_d: full RPA pairing vertex for the condensation correction in compute_bdg_free_energy.
         Must match the vertex used in the SCF gap equation so that ∂F/∂Δ = 0 at the converged point.
@@ -3378,7 +3425,7 @@ class RMFT_Solver:
             ev_all, _ = np.linalg.eigh(
                 vbdg._build_H_stack(vbdg._kpts, m_val, q_val, ds, dd, target_doping, mu, tx, ty, g_J, q_renorm, F67s_mf, out=vbdg._H_stack)
                 )
-            return self.compute_bdg_free_energy(m_val, q_val, ds, dd, target_doping, mu, tx, ty, g_J, V_s, V_d, K_eff_for_free_energy, ev_all)
+            return self.compute_bdg_free_energy(m_val, q_val, ds, dd, target_doping, mu, tx, ty, g_J, g_s, g_d, V_s, V_d, K_eff_for_free_energy, ev_all)
 
         F0 = F(M, Q, Delta)
         H = np.zeros((3, 3))
@@ -3865,7 +3912,7 @@ class RMFT_Solver:
                 J_eff_lT       = self.p.Z * self.p.effective_superexchange(g_J, tx_b, ty_b, doping)
 
                 # Linearised gap at this T's normal-state background (Δ_in=0).
-                lin = s_T.solve_linearized_gap_equation(M, Q, 0.0j, 0.0j, doping, actual_doping, mu, tx, ty, g_J, g_t, res['rigidity_sc']['K_eff'], J_eff_lT, res['chi_SQ_sc'], res['r_MQ_cur'])
+                lin = s_T.solve_linearized_gap_equation(M, Q, 0.0j, 0.0j, doping, actual_doping, mu, tx, ty, g_t, g_J, res['rigidity_sc']['K_eff'], J_eff_lT, res['chi_SQ_sc'], res['r_MQ_cur'])
                 lam_arr[i] = float(lin['lambda_lin_max'])
                 sym_list.append(lin['gap_symmetry'])
             except Exception:
@@ -3971,14 +4018,14 @@ class RMFT_Solver:
         J_eff = self.p.Z * self.p.effective_superexchange(g_J, self.p.t0, self.p.t0, target_doping)
 
         # Rigidity — needed before we can evaluate χ_SQ_q0
-        rigidity = self.compute_JT_rigidity_from_exchange(M, 0.0, mu_n, g_J, target_doping, g_t, q_renorm)
+        rigidity = self.compute_JT_rigidity_from_exchange(M, 0.0, mu_n, g_t, g_J, target_doping, q_renorm)
         K_eff_here = max(rigidity['K_eff'], _MATH_EPS)
 
         # ── 4. χ_SQ at q=0 from full Lindhard tensor ─────────────────────────────
         _Gamma_M, _V_JT_here, _ = self._make_vertex_params(target_doping, tx_eff, ty_eff, g_t, J_eff, K_eff_here)
         E_k_cache_normal = self._get_chi0_norm_cache(M, 0.0, mu_n, tx_eff, ty_eff, g_J, self._get_vbdg(), target_doping=target_doping)
         _, chi_SQ_q0, *_ = self.get_susceptibilities_normal(np.zeros(2), M, 0.0, target_doping, _Gamma_M, mu_n, tx_eff, ty_eff, g_J, chi_QQ_raw, K_eff_here, J_eff, 0.0, r_MQ, E_k_cache_normal, _enforce_c4=True)
-        chi_SS_afm, _, _, _, _ = self.get_susceptibilities_normal(np.array([np.pi, np.pi]), M, 0.0, target_doping, _Gamma_M, mu_n, tx_eff, ty_eff, g_J, chi_QQ_raw, K_eff_here, J_eff, 0.0, r_MQ, E_k_cache_normal, _enforce_c4=False)
+        chi_SS_afm, *_ = self.get_susceptibilities_normal(np.array([np.pi, np.pi]), M, 0.0, target_doping, _Gamma_M, mu_n, tx_eff, ty_eff, g_J, chi_QQ_raw, K_eff_here, J_eff, 0.0, r_MQ, E_k_cache_normal, _enforce_c4=False)
 
         # Normal-state selection rule: χ_SQ = 0 (symmetry + analytic 2-band).
         # Post-SCF correction: if the SCF converged with an active SC condensate, the cross-channel χ_SQ^SC was non-zero and influenced the free energy.
@@ -4111,7 +4158,7 @@ class RMFT_Solver:
             t_eff_v    = float(np.sqrt(0.5 * (tx_eff_v**2 + ty_eff_v**2)))
             J_eff_v    = self.p.Z * self.p.effective_superexchange(g_J, tx_b, ty_b, target_doping)
             mu_n_v     = -2.0 * t_eff_v * (1.0 - 2.0 * abs_d)   # charge-neutral μ at Qv
-            lin = self.solve_linearized_gap_equation(M, Qv, 0.0+0j, 0.0+0j, target_doping, target_doping, mu_n_v, tx_eff_v, ty_eff_v, g_J, g_t, K_eff_here, J_eff_v, 0.0, r_MQ)
+            lin = self.solve_linearized_gap_equation(M, Qv, 0.0+0j, 0.0+0j, target_doping, target_doping, mu_n_v, tx_eff_v, ty_eff_v, g_t, g_J, K_eff_here, J_eff_v, 0.0, r_MQ)
             return lin['lambda_lin_max']
 
         # ── 9. ∂λ_pair/∂Q  (optional) ────────────────────────────────────────────
@@ -4356,7 +4403,7 @@ class VectorizedBdG:
         self._H_stack    = np.zeros((self._N_k,    16, 16), dtype=complex)  # SCF grid buffer
         self._H_stack_ev = np.zeros((self._N_k_ev, 16, 16), dtype=complex)  # chi0 grid buffer
 
-    def _build_H_stack(self, kpts: np.ndarray, M: float, Q: float, Delta_s: complex, Delta_d: complex, target_doping: float, mu: float, tx: float, ty: float, g_J: float, q_renorm: float = 1.0, F67s_mf: float = 0.0, out: Optional[np.ndarray] = None) -> np.ndarray:
+    def _build_H_stack(self, kpts: np.ndarray, M: float, Q: float, Delta_s: complex, Delta_d: complex, target_doping: float, mu: float, tx: float, ty: float, g_J: float, q_renorm: float = 0.0, F67s_mf: float = 0.0, out: Optional[np.ndarray] = None) -> np.ndarray:
         """
         Build the (N, 16, 16) BdG Hamiltonian stack for an arbitrary kpts array.
 
@@ -4495,7 +4542,7 @@ class VectorizedBdG:
         M_stag = float(np.dot(solver.k_weights, mag_A - mag_B)) / 4.0
         return M_stag
 
-    def compute_gap_eq_vectorized(self, M: float, Q: float, Delta_s: complex, Delta_d: complex, target_doping: float, mu: float, tx: float, ty: float, g_J: float, g_t: float, K_eff: float, g_Delta_s: float, g_Delta_d: float, chi_SQ_sc: float, r_MQ: float, _solve_state: '_SolveState', ev: np.ndarray, ec: np.ndarray, _vertex_cache: dict = None) -> Tuple[float, float, float, float, dict]:
+    def compute_gap_eq_vectorized(self, M: float, Q: float, Delta_s: complex, Delta_d: complex, target_doping: float, mu: float, tx: float, ty: float, g_t: float, g_J: float, g_Delta_s: float, g_Delta_d: float, K_eff: float, chi_SQ_sc: float, r_MQ: float, _solve_state: '_SolveState', ev: np.ndarray, ec: np.ndarray, _vertex_cache: dict = None) -> Tuple[float, float, float, float, dict]:
         """
         Gap equation with q-dependent RPA pairing vertex V(q) built from normal-state (Δ=0) susceptibilities.
         Δ enters only via the anomalous pair amplitudes F_AA/F_AB. Sign convention: V>0 attractive, V<0 repulsive.
@@ -4589,11 +4636,11 @@ class VectorizedBdG:
             E_k_cache_normal = solver._get_chi0_norm_cache(M, Q, mu, tx, ty, g_J, self, target_doping=target_doping)
 
             # FM/Pomeranchuk QCP check at q=0
-            chi_SS_q0, chi_SQ_q0, chi_QS_q0, chi_QQ_q0, _ = solver.get_susceptibilities_normal(q_zero, M, Q, target_doping, _Gamma_M, mu, tx, ty, g_J, chi_QQ_bare, K_eff, J_eff, chi_SQ_sc, r_MQ, E_k_cache_normal)
+            chi_SS_q0, chi_SQ_q0, chi_QS_q0, chi_QQ_q0 = solver.get_susceptibilities_normal(q_zero, M, Q, target_doping, _Gamma_M, mu, tx, ty, g_J, chi_QQ_bare, K_eff, J_eff, chi_SQ_sc, r_MQ, E_k_cache_normal)
             _det_q0 = solver._rpa_det(J_eff, _V_JT, chi_SS_q0, chi_SQ_q0, chi_QS_q0, chi_QQ_q0)[0]
 
             # AFM QCP check at q=(π,π) — normal-state (Δ=0); used for V(q) vertex and gap equation.
-            chi_SS_afm, chi_SQ_afm, chi_QS_afm, chi_QQ_afm, _Gamma_M_eff = solver.get_susceptibilities_normal(_q_afm, M, Q, target_doping, _Gamma_M, mu, tx, ty, g_J, chi_QQ_bare, K_eff, J_eff, chi_SQ_sc, r_MQ, E_k_cache_normal)
+            chi_SS_afm, chi_SQ_afm, chi_QS_afm, chi_QQ_afm = solver.get_susceptibilities_normal(_q_afm, M, Q, target_doping, _Gamma_M, mu, tx, ty, g_J, chi_QQ_bare, K_eff, J_eff, chi_SQ_sc, r_MQ, E_k_cache_normal)
             _det_afm = solver._rpa_det(J_eff, _V_JT, chi_SS_afm, chi_SQ_afm, chi_QS_afm, chi_QQ_afm)[0]
 
             # --- Build vertex matrices on the FS  ---
@@ -4603,7 +4650,7 @@ class VectorizedBdG:
                 V_unique = np.empty(len(unique_q), dtype=float)
                 V_jt_u   = np.empty(len(unique_q), dtype=float)
                 for ui, q_u in enumerate(unique_q):
-                    chi_SS, chi_SQ, chi_QS, chi_QQ, _ = solver.get_susceptibilities_normal(q_u, M, Q, target_doping, _Gamma_M, mu, tx, ty, g_J, chi_QQ_bare, K_eff, J_eff, chi_SQ_sc, r_MQ, E_k_cache_normal)
+                    chi_SS, chi_SQ, chi_QS, chi_QQ = solver.get_susceptibilities_normal(q_u, M, Q, target_doping, _Gamma_M, mu, tx, ty, g_J, chi_QQ_bare, K_eff, J_eff, chi_SQ_sc, r_MQ, E_k_cache_normal)
                     V_unique[ui] = solver._rpa_vertex(J_eff, _V_JT, chi_SS, chi_SQ, chi_QS, chi_QQ, _V_cap)
                     V_jt_u[ui]   = solver._rpa_vertex(0.0,   _V_JT, chi_SS, chi_SQ, chi_QS, chi_QQ, _V_cap)
                 
@@ -4625,7 +4672,7 @@ class VectorizedBdG:
                 i_idx_s, j_idx_s, unique_q_s, inv_idx_s = solver._unique_q_pairs(fs_pts_s)
                 V_jt_u_s = np.empty(len(unique_q_s), dtype=float)
                 for u_idx, q_u in enumerate(unique_q_s):
-                    chi_SS_s, chi_SQ_s, chi_QS_s, chi_QQ_s, _ = solver.get_susceptibilities_normal(q_u, M, Q, target_doping, _Gamma_M, mu, tx, ty, g_J, chi_QQ_bare, K_eff, J_eff, chi_SQ_sc, r_MQ, E_k_cache_normal, _enforce_c4=False)
+                    chi_SS_s, chi_SQ_s, chi_QS_s, chi_QQ_s = solver.get_susceptibilities_normal(q_u, M, Q, target_doping, _Gamma_M, mu, tx, ty, g_J, chi_QQ_bare, K_eff, J_eff, chi_SQ_sc, r_MQ, E_k_cache_normal, _enforce_c4=False)
                     V_jt_u_s[u_idx] = solver._rpa_vertex(0.0, _V_JT, chi_SS_s, chi_SQ_s, chi_QS_s, chi_QQ_s, _V_cap)
                 V_ij_jt_s = np.zeros((N_fs_s, N_fs_s), dtype=float)
                 V_ij_jt_s[i_idx_s, j_idx_s] = V_jt_u_s[inv_idx_s]
@@ -4744,7 +4791,7 @@ class VectorizedBdG:
                 'chi_SQ_afm': chi_SQ_afm,
                 'vmat_low_var': _vmat_low_var,
                 'vmat_same_sign': _vmat_same_sign,
-                'Gamma_M_eff': _Gamma_M_eff,
+                'Gamma_M': _Gamma_M,
                 'V_afm_mean': _V_afm_mean,   # mean V(q) at |q|>_V_AFM_Q_MIN·π (AFM region)
                 'V_fwd_mean': _V_fwd_mean,   # mean V(q) at |q|<_V_FWD_Q_MAX·π (forward region)
                 'V_neg_frac': _V_neg_frac,   # fraction q with V<0; >0.9 → globally repulsive
@@ -5410,7 +5457,11 @@ class UnifiedBayesianOptimizer:
             iM = prev['M']                                 if prev else iM0
             iQ = prev['Q']                                 if prev else iQ0
             iD = max(prev['Delta_s']+prev['Delta_d'], iD0) if prev else iD0
-            pt = self._eval_one_doping(solver, doping, Delta_tetra, u, gJT, t_pd, iM, iQ, iD, lambda_soc=lsoc)
+            try:
+                pt = self._eval_one_doping(solver, doping, Delta_tetra, u, gJT, t_pd, iM, iQ, iD, lambda_soc=lsoc)
+            except Exception as e:
+                _scf_log(f"FULL d={doping:.3f}", f"SCF error: {e}")
+                pt = OptimPoint(doping, Delta_tetra, u, gJT, t_pd, 0.0, False, score=0.0)
             if pt.result:
                 prev = pt.result
             if best is None or pt.score > best.score:
@@ -5433,12 +5484,12 @@ class UnifiedBayesianOptimizer:
         converged = result['converged']
 
         # ── Parallel multi-seed for first-order / hysteretic dynamics ────────────
-        _dyn_regime = result.get('scf_dynamics_regime', 'converging') if result is not None else 'converging'
+        _dyn_regime = result.get('scf_dynamics_regime', 'converging')
         if _dyn_regime in ('first_order_jump', 'hysteretic'):
             _scf_log(tag, f"⚠ {_dyn_regime} dynamics — launching {_N_MULTISEED} parallel seeds for basin search")
             rng = np.random.default_rng(seed=abs(hash((doping, Delta_tetra, u, gJT, t_pd))) % (2**31))
             # Seed grid spans relevant (M, Q, Δ) space near current estimate
-            M_est  = result['M'] if result else initial_M
+            M_est  = result['M']
             D_est  = max(Delta, initial_Delta, 0.02)
             _seeds = []
             for _ in range(_N_MULTISEED):
@@ -5465,7 +5516,7 @@ class UnifiedBayesianOptimizer:
 
             # Pick the lowest total free energy among all converged seeds (and current result).
             _candidates = [r for r in _seed_results if r is not None and r.get('converged', False)]
-            if result is not None and converged:
+            if converged:
                 _candidates.append(result)
             if _candidates:
                 result = min(_candidates, key=lambda r: r['F_bdg'] + r.get('F_per_site', 0.0))
@@ -5481,7 +5532,7 @@ class UnifiedBayesianOptimizer:
                 pass
 
         # Dual-basin probe: SC gap exists but Q≈0 → nudge toward JT basin.
-        if (result is not None and converged
+        if (converged
                 and Delta > solver.p.tol * 5
                 and abs(result['Q']) < 1e-3):
             try:
@@ -5506,17 +5557,17 @@ class UnifiedBayesianOptimizer:
             except Exception:
                 pass
 
-        M_conv = result['M'] if result is not None else initial_M
-        q_renorm = result['q_renorm'] if result is not None else 1.0
-        r_MQ = result['r_MQ_cur'] if result is not None else 1.0
+        M_conv = result['M']
+        q_renorm = result['q_renorm']
+        r_MQ = result['r_MQ_cur']
         G_n = solver.compute_G_instability(doping, M_conv, q_renorm, r_MQ)
         if Delta < 1e-8 and Tc < 1e-6:
             return self._g_fallback_score(initial_M, doping, Delta_tetra, u, gJT, t_pd)
         
-        lambda_JT_sc = result['lambda_JT_SC']
+        lambda_JT_sc = result['lambda_JT_sc']
 
         # G_sc: SC-state quantities for _score (d2F_Q at Δ≠0)
-        if result is not None and converged and Delta > solver.p.tol:
+        if converged and Delta > solver.p.tol:
             _vbdg_sc = solver._get_vbdg()
             _E_k_sc, _V_k_sc = np.linalg.eigh(
                 _vbdg_sc._build_H_stack(_vbdg_sc._kpts_ev, result['M'], result['Q'], complex(result['Delta_s']), complex(result['Delta_d']), doping, result['mu'], result['tx'], result['ty'], result['g_J'], result['q_renorm'], result['F67s_mf'], out=_vbdg_sc._H_stack_ev)
