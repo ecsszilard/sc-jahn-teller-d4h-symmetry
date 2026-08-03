@@ -44,7 +44,7 @@ _N_ORB                : int   = 6                   # orbital flavors [Γ6↑,Γ
 _N_BDG                : int   = 4 * _N_ORB          # 24: BdG dimension = 2 sublattices (A,B) × particle/hole × N_ORB.
 
 # ── k-grid and cluster ────────────────────────────────────────────────────────
-_NK                   : int   = 48                  # k-grid points per direction (even required for commensurate q_AFM=(π,π))
+_NK                   : int   = 30                  # k-grid points per direction (even required for commensurate q_AFM=(π,π))
 _CLUSTER_SIZE         : int   = 2
 
 # ── Lindhard / χ₀ kernel ─────────────────────────────────────────────────────
@@ -55,8 +55,8 @@ _FD_MASK_DE           : float = 1e-6                # |ΔE| mask threshold in χ
 _FD_MASK_DE8          : float = 1e-8                # tighter |ΔE| mask for d²F/dM² off-diagonal
 _FS_CACHE_TOL         : float = 1e-3                # parameter-change threshold for FS-points cache invalidation
 _ETA_T_FRAC           : float = 0.10                # normal-state η = _ETA_T_FRAC · kT  (thermal broadening)
-_ETA_DELTA_FRAC       : float = 0.03                # anomalous η += _ETA_DELTA_FRAC · |Δ|  (gap-scale broadening)
-_ETA_GRID_FLOOR       : float = 0.002               # η ≥ _ETA_GRID_FLOOR · t0  (k-grid aliasing floor; ~bandwidth/N_k²)
+_ETA_DELTA_FRAC       : float = 0.02                # anomalous η += _ETA_DELTA_FRAC · |Δ|  (gap-scale broadening)
+_ETA_GRID_FLOOR       : float = 0.001               # η ≥ _ETA_GRID_FLOOR · t0  (k-grid aliasing floor; ~bandwidth/N_k²)
 
 # ── RPA / Moriya spin-fluctuation damping ─────────────────────────────────────
 _ALPHA_MORIYA         : float = 0.02                # Moriya damping floor: α_M ≥ this (numerical safeguard only)
@@ -79,7 +79,8 @@ _DET_DEPTH_CAP        : float = 5.0                 # max det_depth in jump-cap 
 _DET_JUMP_HALF_SCALE  : float = 0.5                 # exp(−this·det_depth) decay rate for gap jump cap past QCP
 _JUMP_CAP_FLOOR       : float = 1.05                # minimum effective_jump_cap (prevents total freeze past QCP)
 _QQ_DELTA_THRESH      : float = 1e-8                # |Δ| threshold below which χ_SQ enforced zero
-_REGR_T_ALPHA         : float = 0.05                # two-sided significance level for the r_J t-test (H0: r_J=1, i.e. no renormalisation)
+_REGR_T_ALPHA         : float = 0.99                # two-sided significance level for the r_J t-test (H0: r_J=1, i.e. no renormalisation)
+_REGR_SHRINK_POWER    : float = 2.0                 # exponent for smooth shrinkage (≥1, higher = stronger shrinkage)
 
 # ── JT / SC-triggered Jahn–Teller ──────────────────────────────────────────────
 _LAMBDA_JT_VIABLE     : float = 0.05                # Minimum λ_JT_sc = g²·|χ_τ_sc|/K_eff for SC-triggered JT viability. Sets upper K_SC = g²·|χ_τ_sc|/0.05 bound on K_lattice
@@ -109,16 +110,16 @@ _M0_S_CLIP_MAX        : float = 5.0                 # upper clip for Stoner (pre
 # ── SCF iteration / mixing adaptive control ─────────────────────────────────────
 _MAX_ITER             : int   = 700
 _MIN_ITER             : int   = 4
-_MIXING               : float = 0.06                # base weight of the newly computed residual in the solution update; lower values improve stability at the cost of slower convergence.
-_ALPHA_HF             : float = 0.35                # Newton vs BdG fixpoint blend for M update (0=fixpoint, 1=Newton)
+_MIXING               : float = 0.05                # base weight of the newly computed residual in the solution update; lower values improve stability at the cost of slower convergence.
+_ALPHA_HF             : float = 0.31                # Newton vs BdG fixpoint blend for M update (0=fixpoint, 1=Newton)
 _Q_UPDATE_PERIOD      : int   = 3                   # update Q every N inner iterations
 _Q_THR_REL            : float = 0.005               # fraction of lambda_hop; Q change below this skips vertex rebuild
 _Q_SEED_THR           : float = 1e-5
 _M_THR_REL            : float = 0.01                # absolute M change threshold
 _REGR_EPS             : float = 1e-12               # zero protection at dividers
 _REGR_VAR_MIN         : float = 1e-9                # variance minimum to avoid overshoot instability
-_EMA_NEW_WEIGHT       : float = 0.28                # EMA weight for q_renorm, r_MQ, V_d, Λ_inst
-_EMA_NEW_QRW          : float = 0.38                # EMA weight for q_renorm
+_EMA_NEW_WEIGHT       : float = 0.14                # EMA weight for r_Q, r_MQ, V_d, Λ_inst
+_EMA_NEW_QRW          : float = 0.38                # EMA weight for r_Q
 _SCF_DIVERGE_RATIO    : float = 1.05                # max_diff > prev × this → SCF classified as diverging
 _SCF_STAGNATE_RATIO   : float = 0.95                # max_diff > prev × this (and not diverging) → SCF stagnating
 _SCF_ALPHA_DECAY      : float = 0.95                # α *= this when SC+JT active and converging (mild damping)
@@ -154,7 +155,6 @@ _ANDERSON_W_HI        : float = 0.8                 # upper blend weight
 _XI_NODAL_MIN         : float = 2.0                 # ξ/a > this required for coherent nodal quasiparticles (BCS side)
 _ORBITAL_SEL_FRAC     : float = 0.15                # |ξ_Γ₆ − ξ_Γ₇|/ξ > this → system classified as orbitally selective
 _GL_SPINODAL_JUMP     : float = 0.15                # D_spinodal/Δ₀ < this → GL extrapolation considered reliable (small first-order jump)
-_DOPING_MOTT_FLOOR    : float = 0.01                # |δ| < this → at/near Mott insulator; skip SCF, return metallic=False
 
 # ── IC (inter-channel) correction ratio bounds ────────────────────────────────
 _IC_RATIO_FLOOR       : float = 1.05                # r < this → negligible IC, no suppression applied
@@ -351,40 +351,31 @@ class InstabilityInfo:
 
 @dataclass
 class ModelParams:
-    """
-    Derived fields (set in __post_init__):
-      t0       = t_pd²/Δ_CT
-      Delta_CF = Γ₆–Γ₇ SOC+CF gap
-      U_dd     = u·t0
-      U_pp     = U_dd * Upp_ratio
-    """
     # --- Primary inputs ---
-    t_pd:          float      # eV    pd hybridisation integral
-    u:             float      # —     U/t0 ratio; U = u·t0 = u·t_pd²/Δ_CT (charge-transfer: typ. 6–12)
-    lambda_soc:    float      # eV    atomic SOC λ t2g shell; determines Γ₆–Γ₇ splitting
-    Delta_tetra:   float      # eV    tetragonal axial CF Δ_tet·Lz²; negative = z-compression
-                              #       Partial cancellation with SOC tunes Γ₆–Γ₇ gap independently of λ
-    g_JT:          float      # eV/Å  Jahn–Teller electron–phonon coupling (B1g channel: Q·(Lx²-Ly²))
-                              #       increasing g_JT beyond the SC-triggered window is risky, because spontaneous JT (G3[2,2] < 0) always precedes the RPA cross-channel divergence.
-    K_lattice:     float      # eV/Å² bare lattice spring constant, B1g channel (phonon stiffness, no exchange)
-                              #       Physical: ω_JT=60meV, mass~Cu → K~1-2 eV/Å²; K_eff < K_lattice after exchange correction
-                              #       K_lattice must satisfy: K_spont = g²/Δ_CF < K < g²/(0.05·π·t0) for SC-JT window (λ_JT > 0.05).
-    lambda_hop:    float      # Å     hopping decay length for B₁g anisotropy: t(Q) = t0·exp(±Q/λ_hop)
-    g_Eg2:         float      # eV/Å  Jahn-Teller electron-phonon coupling, Eg,2 channel (Q_Eg2·(LyLz+LzLy))
-                              #       Eg,2 is local (no hopping-renormalisation term, unlike B1g's t(Q) anisotropy).
-                              
-    K_lattice_Eg2: float      # eV/Å² bare lattice spring constant, Eg,2 channel (independent stiffness from K_lattice)
+    t_pd:             float      # eV    pd hybridisation integral
+    u:                float      # —     U/t0 ratio; U = u·t0 = u·t_pd²/Δ_CT (charge-transfer: typ. 6–12)
+    lambda_soc:       float      # eV    atomic SOC λ t2g shell; determines Γ₆–Γ₇ splitting
+    Delta_tetra:      float      # eV    tetragonal axial CF Δ_tet·Lz²; negative = z-compression
+                                 #       Partial cancellation with SOC tunes Γ₆–Γ₇ gap independently of λ
+    g_JT:             float      # eV/Å  Jahn–Teller electron–phonon coupling (B1g channel: Q·(Lx²-Ly²))
+                                 #       increasing g_JT beyond the SC-triggered window is risky, because spontaneous JT (G3[2,2] < 0) always precedes the RPA cross-channel divergence.
+    K_lattice:        float      # eV/Å² bare lattice spring constant, B1g channel (phonon stiffness, no exchange)
+                                 #       K_lattice must satisfy: K_spont = g²/Δ_CF < K < g²/(0.05·π·t0) for SC-JT window (λ_JT > 0.05).
+    lambda_hop:       float      # Å     hopping decay length for B₁g anisotropy: t(Q) = t0·exp(±Q/λ_hop)
+    g_Eg2:            float      # eV/Å  Jahn-Teller electron-phonon coupling, Eg,2 channel (Q_Eg2·(LyLz+LzLy))
+                                 #       Eg,2 is local (no hopping-renormalisation term, unlike B1g's t(Q) anisotropy).         
+    K_lattice_Eg2:    float      # eV/Å² bare lattice spring constant, Eg,2 channel (independent stiffness from K_lattice)
 
     # --- Charge-transfer / RPA / gap symmetry ---
-    Delta_B1g_static: float   # eV    static B1g (x²-y²) crystal-field splitting, Δ_ip·(Lx²-Ly²); splits Γ₇→Γ₇a+Γ₇b.
-    hybrid_scale:  float      #       above 4.0 assumes stronger covalency (the charge carriers would typically reside less than ~80% on the metal ion)
-    Upp_ratio:     float      # eV
-    Delta_CT:      float      # eV    charge-transfer gap (ZSA scale); sets scale for CT-insulator crossover
+    Delta_B1g_static: float      # eV    static B1g (x²-y²) crystal-field splitting, Δ_ip·(Lx²-Ly²); splits Γ₇→Γ₇a+Γ₇b.
+    hybrid_scale:     float      #       above 4.0 assumes stronger covalency (the charge carriers would typically reside less than ~80% on the metal ion)
+    Upp_ratio_bare:   float      #       the bare (without hybridization) U_pp / U_dd ratio varies between 0.2 and 2.0 for 3d-5d transition metals due to the spatial extent of the ligand orbital
+    Delta_CT:         float      # eV    charge-transfer gap (ZSA scale); sets scale for CT-insulator crossover
 
     # --- Numerics ---
-    Z:             int        # 2D square lattice coordination number
-    kT:            float      # eV  temperature — keep kT < Tc to allow gap to open;
-    tol:           float
+    Z:                int        #       metal's coordination number in 2D square lattice
+    kT:               float      #       eV  temperature — keep kT < Tc to allow gap to open;
+    tol:              float
 
     def __post_init__(self):
         # L = 1 operators
@@ -562,7 +553,11 @@ class ModelParams:
         self.t0  = self.t_pd**2 / self.Delta_CT
 
         self.U_dd = self.u * self.t0
-        self.U_pp = self.Upp_ratio * self.U_dd
+        # Ligand coordination number: typically hybridizes with two neighboring metal atoms
+        z_O = self.Z / 2.0
+        # Weak-hybridization limit: recovers the Wannier-derived form U_pp ≈ r0 * U_dd - alpha * t_pd², where r0 encodes the bare p-d orbital extent mismatch and alpha captures delocalization-driven screening.
+        self.U_pp = (self.Upp_ratio_bare * self.U_dd) / (1.0 + z_O * self.t_pd**2 / (self.Delta_CT * (self.Delta_CT + self.U_dd)))
+
         self.J_pdct = 1.0 / self.U_dd + 1.0 / (self.Delta_CT + self.U_pp / 2.0)
         assert _NK % 2 == 0, f"_NK={_NK} must be even for commensurate q_AFM=(π,π)"
 
@@ -571,21 +566,6 @@ class ModelParams:
         self.k_points  = np.column_stack((KX_scf.flatten(), KY_scf.flatten()))
         self.N_k       = len(self.k_points)
         self.k_weights = _uniform_bz_weights_2d(_NK, _NK)   # uniform 1/N weights (periodic BZ)
-        
-        # ── Magnetic Brillouin Zone (MBZ) fold-down ──────────────────────────────
-        # In collinear AFM (Q=(π,π)), k and k+Q are identical physical states.
-        _NK_half = _NK // 2
-        _kx_ev_arr = self.k_points[:, 0]
-        _ky_ev_arr = self.k_points[:, 1]
-        # Convert to 0-based grid indices (grid step = 2pi/NK, origin at -pi)
-        _ix_ev = (np.round((_kx_ev_arr + np.pi) * (_NK / (2.0 * np.pi)))).astype(int) % _NK
-        _iy_ev = (np.round((_ky_ev_arr + np.pi) * (_NK / (2.0 * np.pi)))).astype(int) % _NK
-        _code_ev         = (_ix_ev * _NK + _iy_ev).astype(np.int32)
-        _code_partner_ev = ((_ix_ev + _NK_half) % _NK * _NK + (_iy_ev + _NK_half) % _NK).astype(np.int32)
-        # Canonical half: keep the representative with the smaller flat index.
-        self.mbz_mask = (_code_ev < _code_partner_ev)           # (N_k,) bool, True for canonical MBZ rep (smaller flat index)
-        # Lehmann sums need uniform MBZ weights (zero outside MBZ) to eliminate double-counting
-        self.k_weights_mbz = np.where(self.mbz_mask, 2.0 / self.N_k, 0.0).astype(np.float64)
 
         # General shift-index table for ALL q-vectors on the 2π/_NK grid.
         # For q = (nx, ny) * 2π/_NK the k+q grid is a cyclic per,utation of k_even:  E(k+q)[i] = E(k)[shift_table[nx, ny, i]]
@@ -635,7 +615,7 @@ class ModelParams:
         g_Delta_d = g_t + (g_J - g_t) * self.p_7
         return g_t, g_J, g_Delta_s, g_Delta_d
     
-    def exchange_channels(self, Q: float, n_kspace: float, tx_bare: float, ty_bare: float, g_J: float, q_renorm: float = 0.0) -> tuple:
+    def exchange_channels(self, Q: float, n_kspace: float, tx_bare: float, ty_bare: float, g_J: float, r_Q: float = 0.0) -> Tuple[np.ndarray, float]:
         """
         Q-dependent multipolar exchange in the full [Γ₆↑, Γ₆↓, Γ₇ₐ↑, Γ₇ₐ↓, Γ₇ᵦ↑, Γ₇ᵦ↓] basis (no downfolding).
             D₄h decomposition: J(Q) = J_A1g(Q)·diag(1,1,η_J7a²,η_J7a²,η_J7b²,η_J7b²) + J_B1g(Q)·B1g_op
@@ -660,8 +640,8 @@ class ModelParams:
         J_A1g_diag = n_kspace * g_J * self.J_pdct * (tx_bare**2 + ty_bare**2) * np.array(
             [1.0, 1.0, eta_J7a**2, eta_J7a**2, eta_J7b**2, eta_J7b**2]
         ) / 2.0  # single-bond ZSA superexchange: even, longitudinal scale
-        # q_renorm is an additive residual beyond the bare (Gutzwiller-renormalised) coupling.
-        J_B1g_scalar = n_kspace * g_J * self.J_pdct * (tx_bare**2 - ty_bare**2) * np.sqrt(eta_J7a**2 + eta_J7b**2) * (1.0 + q_renorm) / 2.0  # odd, transverse scale
+        # r_Q is an additive residual beyond the bare (Gutzwiller-renormalised) coupling.
+        J_B1g_scalar = n_kspace * g_J * self.J_pdct * (tx_bare**2 - ty_bare**2) * np.sqrt(eta_J7a**2 + eta_J7b**2) * (1.0 + r_Q) / 2.0  # odd, transverse scale
         return J_A1g_diag, J_B1g_scalar
 
     def moriya_gamma(self, doping: float, t_eff: float, J_eff: float) -> float:
@@ -829,6 +809,65 @@ def _lindhard_bubble(sector_pairs: tuple, E_k_all: np.ndarray, V_k_all: np.ndarr
                 optimize='greedy')
     return 0.25 * (chi + chi.conj().T)   # 0.25 = 0.5 (Nambu particle-hole doubling) × 0.5 (hermitisation of chi[a,b]↔chi[b,a])
 
+def _unique_q_pairs(fs_pts: np.ndarray) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """
+    Using the full D₂h magnetic Shubnikov symmetry of the collinear AFM state.
+    
+    Returns
+    -------
+    i_idx, j_idx : upper-triangle pair indices  (n_pairs,)
+    unique_q     : canonical q-vectors in (−π, π]²  (n_unique, 2)
+    inv_idx      : pair → unique_q row mapping  (n_pairs,)
+    """
+    i_idx, j_idx = np.triu_indices(len(fs_pts))
+    q_raw = fs_pts[i_idx] - fs_pts[j_idx]
+
+    # Fold into (−π, π] interval
+    q_arr = (q_raw + np.pi) % (2.0 * np.pi) - np.pi
+
+    # Convert to integer representation (robust against floating-point noise)
+    q_int_raw = np.rint(q_arr * _Q_UNIQUE_SCALE).astype(np.int64)
+
+    # Map to the first quadrant using component-wise absolute values.
+    # This step combines:
+    #   - inversion symmetry (q → −q)
+    #   - two-fold rotations / mirrors combined with time reversal
+    #     (σ_x·T : q_x → −q_x,  σ_y·T : q_y → −q_y) ⇒ χ(q) = χ(|q_x|, |q_y|)
+    qx_canon = np.abs(q_int_raw[:, 0])
+    qy_canon = np.abs(q_int_raw[:, 1])
+    q_int_canon = np.stack([qx_canon, qy_canon], axis=1)
+
+    # Unique canonical vectors and inverse index for each original pair
+    u_int, inv_idx = np.unique(q_int_canon, axis=0, return_inverse=True)
+
+    # Convert back to floating-point (units of 2π/_Q_UNIQUE_SCALE)
+    unique_q = u_int.astype(np.float64) / _Q_UNIQUE_SCALE
+    # Ensure the points stay in the correct BZ (should already be in [0, π])
+    unique_q = (unique_q + np.pi) % (2.0 * np.pi) - np.pi
+    return i_idx, j_idx, unique_q, inv_idx
+
+def _fs_integration_weights(pts: np.ndarray, vF_arr: np.ndarray) -> np.ndarray:
+    """
+    Integration weight w_i = dl_i / ( (2π)² · |vF_i| ) for each Fermi surface point.
+    The proper FS integration measure for a 2D BZ is:
+        ∫_{FS} dS / |vF|  ≈  Σ_i dl_i / |vF_i|
+    where dl_i is the arc-length element around the FS contour.
+    
+    The returned weight includes the BZ area normalisation (2π)² so that:
+        Σ_i w_i · f(k_i)  ≈  ∫_{BZ} d²k f(k) δ(ε_k)
+    """
+    N = len(pts)
+    angles     = np.arctan2(pts[:, 1], pts[:, 0])
+    sort_idx   = np.argsort(angles)
+    sorted_pts = pts[sort_idx]
+    diff_prev  = sorted_pts - np.roll(sorted_pts,  1, axis=0)
+    diff_next  = sorted_pts - np.roll(sorted_pts, -1, axis=0)
+    dl_sorted  = 0.5 * (np.linalg.norm(diff_prev, axis=1)
+                        + np.linalg.norm(diff_next, axis=1))
+    dl = np.empty(N)
+    dl[sort_idx] = dl_sorted
+    return dl / (_BZ_NORM * np.maximum(np.abs(vF_arr), _VF_FLOOR_TIGHT))
+
 @dataclass
 class _SolveState:
     """
@@ -848,9 +887,6 @@ class RMFT_Solver:
         self.k_points       = params.k_points
         self.N_k            = params.N_k
         self.k_weights      = params.k_weights
-        # MBZ-folded weights: zero outside the kx+ky>=0 half-domain, doubled inside, so that sum_{k in MBZ} k_weights_mbz = 1 without double-counting k and k+Q_AFM.
-        self.k_weights_mbz  = params.k_weights_mbz            # (N_k,) float64
-        self.mbz_mask       = params.mbz_mask                 # (N_k,) bool
         self.shift_table    = params.shift_table              # (nk, nk, N_k) int32 — cyclic shift index
 
         # Orbital operators derived from the SOC+CF eigenbasis.
@@ -954,8 +990,7 @@ class RMFT_Solver:
         - The orbital character weight p_7 is updated dynamically from the Γ₆/Γ₇ₐ occupations (the pairing-active
           channel) and used to interpolate the d-wave pairing vertex (g_Δd), while the s-wave vertex stays at g_t.
         """
-        vbdg = self._get_vbdg()
-        ev, ec = self._get_chi0_norm_cache(M, Q, n_kspace, mu, g_t, g_J, vbdg)
+        ev, ec = self._get_chi0_norm_cache(M, Q, n_kspace, mu, g_t, g_J, self._get_vbdg())
         dens = self._compute_orbital_densities(ev, ec)
         n6  = dens[0] + dens[1]
         n7  = dens[2] + dens[3]
@@ -990,10 +1025,6 @@ class RMFT_Solver:
         self._vbdg            = None   # re-created on first _get_vbdg()
         self._chi0_norm_cache = None   # normal-state χ₀ eigenvector cache
         self._fs_cache_dict   = None   # unified FS sample cache (fs_pts, vF) keyed by (params, n_fs)
-        self._last_Delta_s    = 0.0 + 0j
-        self._last_Delta_d    = 0.0 + 0j
-        self._last_Q          = 0.0
-        self._last_Q_Eg2      = 0.0
 
     def _clone_solver_at_T(self, T: float) -> 'RMFT_Solver':
         """
@@ -1017,7 +1048,7 @@ class RMFT_Solver:
         self._rebuild_orbital_operators()
         self._reset_transient_state()
 
-    def _calc_dHdQ(self, M: float, Q: float, n_kspace: float, mu: float, g_t: float, g_J: float, q_renorm: float) -> np.ndarray:
+    def _calc_dHdQ(self, M: float, Q: float, n_kspace: float, mu: float, g_t: float, g_J: float, r_Q: float) -> np.ndarray:
         """
         H(Q) depends on Q through THREE channels:
           1. Local JT term:      β_k(Q) · g_JT · Q · B1g_op
@@ -1035,7 +1066,7 @@ class RMFT_Solver:
         beta_k = self.p.wave_function_weight(tx_b, ty_b, _kx, _ky)
 
         # ---- Numerical derivative of beta(Q) ----
-        eps  = max(1e-4, 0.01 * abs(Q) + 1e-4)
+        eps = max(1e-5, 0.01 * abs(Q) + 1e-5)
         tx_p, ty_p = self.p.effective_hopping_anisotropic(Q + eps)
         tx_m, ty_m = self.p.effective_hopping_anisotropic(Q - eps)
         beta_p = self.p.wave_function_weight(tx_p, ty_p, _kx, _ky)
@@ -1048,8 +1079,8 @@ class RMFT_Solver:
         dH_AB_dQ_T = dH_AB_dQ.transpose(0, 2, 1)
 
         # AFM Weiss-field contribution: ∂H_A/∂Q, ∂H_B/∂Q via J_A1g_diag(Q); k-independent, zero identically at M=0, and cancels the (Q-independent) −μ/Δ_CF terms exactly.
-        J_A1g_p, _ = self.p.exchange_channels(Q + eps, n_kspace, tx_p, ty_p, g_J, q_renorm)
-        J_A1g_m, _ = self.p.exchange_channels(Q - eps, n_kspace, tx_m, ty_m, g_J, q_renorm)
+        J_A1g_p, _ = self.p.exchange_channels(Q + eps, n_kspace, tx_p, ty_p, g_J, r_Q)
+        J_A1g_m, _ = self.p.exchange_channels(Q - eps, n_kspace, tx_m, ty_m, g_J, r_Q)
         dH_A_dQ = (self.build_local_hamiltonian_for_bdg(+1.0, M, J_A1g_p, mu)
                    - self.build_local_hamiltonian_for_bdg(+1.0, M, J_A1g_m, mu)) / (2.0 * eps)
         dH_B_dQ = (self.build_local_hamiltonian_for_bdg(-1.0, M, J_A1g_p, mu)
@@ -1082,7 +1113,7 @@ class RMFT_Solver:
         dHdQ[:] = 0.5 * (dHdQ + dHdQ.conj().transpose(0, 2, 1))
         return dHdQ
 
-    def compute_JT_rigidity_from_exchange(self, M: float, Q: float, Delta_s: complex, Delta_d: complex, n_kspace: float, mu: float, g_t: float, g_J: float, q_renorm: float = 0.0, F67s_mf: float = 0.0, Q_Eg2: float = 0.0) -> Dict:
+    def compute_JT_rigidity_from_exchange(self, M: float, Q: float, Delta_s: complex, Delta_d: complex, n_kspace: float, mu: float, g_t: float, g_J: float, r_Q: float = 0.0, F67s_mf: float = 0.0, Q_Eg2: float = 0.0) -> Dict:
         """
         Exchange contribution to JT stiffness: ∂²F_ex/∂Q².
             F_ex = Σ_{αβ} J_{αβ}(Q)⟨O_α(Q)⟩⟨O_β(Q)⟩
@@ -1098,7 +1129,7 @@ class RMFT_Solver:
         G3[2,2] = 1 − χ_QQ/K_eff < 0 → SC-triggered JT.
         """
         vbdg = self._get_vbdg()
-        eps  = max(1e-4, 0.01 * abs(Q) + 1e-4)
+        eps  = max(1e-5, 0.01 * abs(Q) + 1e-5)
         sz_op = self.sz_op
 
         W = np.zeros((_N_ORB, _N_BDG), dtype=float)
@@ -1115,11 +1146,11 @@ class RMFT_Solver:
 
         def _evaluate_Q(Qv):
             ev, ec = np.linalg.eigh(
-                vbdg._build_H_stack(vbdg._kpts, M, Qv, Delta_s, Delta_d, n_kspace, mu, g_t, g_J, q_renorm, F67s_mf)
+                vbdg._build_H_stack(vbdg._kpts, M, Qv, Delta_s, Delta_d, n_kspace, mu, g_t, g_J, r_Q, F67s_mf)
                 )
             O_exp = _calc_O_exp(ev, ec)
             tx_b, ty_b = self.p.effective_hopping_anisotropic(Qv)
-            J_A1g_diag_v, J_B1g_scalar_v = self.p.exchange_channels(Qv, n_kspace, tx_b, ty_b, g_J, q_renorm)
+            J_A1g_diag_v, J_B1g_scalar_v = self.p.exchange_channels(Qv, n_kspace, tx_b, ty_b, g_J, r_Q)
             J_mat = self.p.Z * (np.diag(J_A1g_diag_v) + J_B1g_scalar_v * self.B1g_op)
             return O_exp, J_mat
         
@@ -1221,7 +1252,7 @@ class RMFT_Solver:
         exp_k = np.einsum('kn,kn->k', diag_qp, f_n)
         return float(np.dot(self.k_weights, exp_k)) / 4.0
 
-    def _compute_chi_tau(self, M: float, Q: float, Delta_s: complex, Delta_d: complex, n_kspace: float, mu: float, g_t: float, g_J: float, q_renorm: float = 0.0, F67s_mf: float = 0.0) -> Dict:
+    def _compute_chi_tau(self, M: float, Q: float, Delta_s: complex, Delta_d: complex, n_kspace: float, mu: float, g_t: float, g_J: float, r_Q: float = 0.0, F67s_mf: float = 0.0) -> Dict:
         """
         JT orbital susceptibility χ_τ = ∂⟨B1g_op⟩/∂(g_JT·Q) via Richardson-extrapolated
         central finite difference of the per-site ⟨B1g_op⟩ expectation value.
@@ -1245,8 +1276,8 @@ class RMFT_Solver:
 
         def _cd(dq: float, ds: complex, dd: complex) -> float:
             """Central difference d⟨B1g⟩/dQ at step dq."""
-            vp = self.B1g_expectation(*self.p.effective_hopping_anisotropic(Q + dq), np.linalg.eigh(vbdg._build_H_stack(vbdg._kpts, M, Q + dq, ds, dd, n_kspace, mu, g_t, g_J, q_renorm, F67s_mf, out=vbdg._H_stack)))
-            vm = self.B1g_expectation(*self.p.effective_hopping_anisotropic(Q - dq), np.linalg.eigh(vbdg._build_H_stack(vbdg._kpts, M, Q - dq, ds, dd, n_kspace, mu, g_t, g_J, q_renorm, F67s_mf, out=vbdg._H_stack)))
+            vp = self.B1g_expectation(*self.p.effective_hopping_anisotropic(Q + dq), np.linalg.eigh(vbdg._build_H_stack(vbdg._kpts, M, Q + dq, ds, dd, n_kspace, mu, g_t, g_J, r_Q, F67s_mf, out=vbdg._H_stack)))
+            vm = self.B1g_expectation(*self.p.effective_hopping_anisotropic(Q - dq), np.linalg.eigh(vbdg._build_H_stack(vbdg._kpts, M, Q - dq, ds, dd, n_kspace, mu, g_t, g_J, r_Q, F67s_mf, out=vbdg._H_stack)))
             return (vp - vm) / (2.0 * dq)
 
         def _richardson(ds: complex, dd: complex) -> tuple:
@@ -1314,18 +1345,18 @@ class RMFT_Solver:
             'chi_tau_weight': w_sc,   # 1.0=full, 0.5=halved, 0.0=suppressed
         }
 
-    def _chi_QQ_matrix_elements(self, M: float, Q: float, Delta_s: complex, Delta_d: complex, n_kspace: float, mu: float, g_t: float, g_J: float, q_renorm: float = 0.0, F67s_mf: float = 0.0, Q_Eg2: float = 0.0, return_matrix: bool = False):
+    def _chi_QQ_matrix_elements(self, M: float, Q: float, Delta_s: complex, Delta_d: complex, n_kspace: float, mu: float, g_t: float, g_J: float, r_Q: float = 0.0, F67s_mf: float = 0.0, Q_Eg2: float = 0.0, return_matrix: bool = False):
         """Bare JT orbital susceptibility: χ_QQ = −∂²Ω/∂Q² evaluated at Δ=0. χ_QQ is a normal-state quantity
         return_matrix=True: returns the full 2×2 matrix {χ_QQ[B1g,B1g], χ_QQ[B1g,Eg2]; χ_QQ[Eg2,B1g],
         χ_QQ[Eg2,Eg2]} via mixed finite differences of the SAME grand potential Ω(Q, Q_Eg2), using a
         9-point stencil (the B1g-only diagonal term reuses the original 3-point formula exactly).
         """
-        dQ = max(1e-4, 1e-3 * abs(Q) + 1e-5)
+        dQ = max(8e-5, 8e-4 * abs(Q) + 1e-5)
         vbdg = self._get_vbdg()
 
         def omega(Qval, Qeg2val):
             ev = np.linalg.eigvalsh(
-                vbdg._build_H_stack(vbdg._kpts, M, Qval, Delta_s, Delta_d, n_kspace, mu, g_t, g_J, q_renorm, F67s_mf, vbdg._H_stack, Qeg2val)
+                vbdg._build_H_stack(vbdg._kpts, M, Qval, Delta_s, Delta_d, n_kspace, mu, g_t, g_J, r_Q, F67s_mf, vbdg._H_stack, Qeg2val)
                 )
             arg = np.clip(np.abs(ev) / self.kT, 0.0, _FERMI_ARG_CLIP)
             Omega_kn = np.minimum(0.0, ev) - self.kT * np.log1p(np.exp(-arg))
@@ -1362,7 +1393,7 @@ class RMFT_Solver:
                         [chi_QQ_cross / g_cross, chi_QQ_eg2 / g_Eg2_2]], dtype=float)
         return chi
 
-    def estimate_chi_SQ_q_full(self, target_doping: float, M: float, n_kspace: float, mu: float, J_eff: float, q_renorm: float, F67s_mf: float, n_q: int):
+    def estimate_chi_SQ_q_full(self, target_doping: float, M: float, Q: float, Delta_s: float, Delta_d: float, n_kspace: float, mu: float, J_eff: float, r_Q: float, F67s_mf: float, n_q: int):
         """
         BZ scan of χ_SQ(q) = Tr[S_z · χ₀[Γ₆,Γ₇](q)] in both the normal and SC states.
 
@@ -1377,7 +1408,7 @@ class RMFT_Solver:
         """
         vbdg = self._get_vbdg()
         g_t, g_J, _, _ = self.p.get_gutzwiller_factors(target_doping)
-        tx_b, ty_b = self.p.effective_hopping_anisotropic(self._last_Q)
+        tx_b, ty_b = self.p.effective_hopping_anisotropic(Q)
         tx, ty = g_t * tx_b, g_t * ty_b
 
         # Normal-state eigenstates (Δ=0)
@@ -1385,13 +1416,13 @@ class RMFT_Solver:
             vbdg._build_H_stack(vbdg._kpts, M, 0.0, 0.0j, 0.0j, n_kspace, mu, g_t, g_J, out=vbdg._H_stack)
             )
         E_k_sc, V_k_sc = np.linalg.eigh(
-            vbdg._build_H_stack(vbdg._kpts, M, self._last_Q, self._last_Delta_s, self._last_Delta_d, n_kspace, mu, g_t, g_J, q_renorm, F67s_mf, out=vbdg._H_stack)
+            vbdg._build_H_stack(vbdg._kpts, M, Q, Delta_s, Delta_d, n_kspace, mu, g_t, g_J, r_Q, F67s_mf, out=vbdg._H_stack)
             )
         
         f_k_n  = _fermi_function(E_k_n, self.kT)
         eta_n  = max(_ETA_T_FRAC * self.kT, _ETA_GRID_FLOOR * self.p.t0)    # Normal-state: thermal broadening dominates (bands gapped by h_afm).
         _Gamma_M = self.p.moriya_gamma(target_doping, np.sqrt(0.5 * (tx**2 + ty**2)), J_eff) 
-        _chi_QQ_n = self._chi_QQ_matrix_elements(M, self._last_Q, 0.0j, 0.0j, n_kspace, mu, g_t, g_J)
+        _chi_QQ_n = self._chi_QQ_matrix_elements(M, Q, 0.0j, 0.0j, n_kspace, mu, g_t, g_J)
         
         _qvals = np.linspace(-np.pi, np.pi, n_q, endpoint=False)
         _QX, _QY = np.meshgrid(_qvals, _qvals)
@@ -1412,8 +1443,8 @@ class RMFT_Solver:
             ny = int(round(q[1] / dk)) % _NK
             shift_idx = self.shift_table[nx, ny]
 
-            # Normal state: _NORMAL_SECTOR_PAIRS on Δ=0 eigenstates (MBZ weights eliminate k / k+Q_AFM double-counting)
-            chi_n = _lindhard_bubble(_NORMAL_SECTOR_PAIRS, E_k_n, V_k_n, f_k_n, shift_idx, self.k_weights_mbz, eta_n, self.kT)
+            # Normal state: _NORMAL_SECTOR_PAIRS on Δ=0 eigenstates
+            chi_n = _lindhard_bubble(_NORMAL_SECTOR_PAIRS, E_k_n, V_k_n, f_k_n, shift_idx, self.k_weights, eta_n, self.kT)
             cr_n = chi_n.real
             chi_SS_n[i_q] = float(self.sz_op @ cr_n @ self.sz_op)
             chi_SQ_n[i_q] = float(np.trace(np.diag(sz_6) @ cr_n[0:2, 2:4]) + np.trace(np.diag(sz_7a) @ cr_n[2:4, 0:2])
@@ -1421,7 +1452,7 @@ class RMFT_Solver:
 
             # χ_SQ evaluated on the condensate band structure, which lifts the D₄h B₂g selection rule via Bogoliubov Γ₆/Γ₇ mixing in normal propagator.
             # SC-state eigenstates (Δ≠0) — same sector pairs, different bands
-            _chi_SS_sc, _chi_SQ_sc, _chi_QQ_sc = self.get_susceptibilities_sc(M, self._last_Q, self._last_Delta_s, self._last_Delta_d, n_kspace, mu, g_t, g_J, q, _Gamma_M, q_renorm, (E_k_sc, V_k_sc))
+            _chi_SS_sc, _chi_SQ_sc, _chi_QQ_sc = self.get_susceptibilities_sc(M, Q, Delta_s, Delta_d, n_kspace, mu, g_t, g_J, q, _Gamma_M, r_Q, (E_k_sc, V_k_sc))
             chi_SS_sc[i_q]     = _chi_SS_sc
             chi_SQ_sc[i_q]     = _chi_SQ_sc
             chi_QQ_sc_arr[i_q] = _chi_QQ_sc
@@ -1572,12 +1603,12 @@ class RMFT_Solver:
         chi_val = np.einsum('knm,knm,kmn->', kernel, M_A_bands, M_B_bands)
         return complex(chi_val) / 4
     
-    def build_dHdQ_band_basis(self, M: float, Q: float, n_kspace: float, mu: float, g_t: float, g_J: float, q_renorm: float, V_k_all: np.ndarray, V_kQ: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
+    def build_dHdQ_band_basis(self, M: float, Q: float, n_kspace: float, mu: float, g_t: float, g_J: float, r_Q: float, V_k_all: np.ndarray, V_kQ: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
         """
         Build the ∂H/∂Q vertex matrix in the band basis, suitable for the Nambu Lehmann sum — Ward-identity consistent.
         Returns BOTH bra/ket role matrices built from the SAME local dHdQ(k)
         """
-        dHdQ = self._calc_dHdQ(M, Q, n_kspace, mu, g_t, g_J, q_renorm)
+        dHdQ = self._calc_dHdQ(M, Q, n_kspace, mu, g_t, g_J, r_Q)
 
         # Transform to band basis
         M_A_bands_SQ = np.einsum('kan,kab,kbm->knm', V_k_all.conj(), dHdQ, V_kQ)
@@ -1634,7 +1665,7 @@ class RMFT_Solver:
         H_hop_expect /= 4.0    # 2 (sublattice) × 2 (particle-hole) Nambu doubling
         return float(H_hop_expect) / (self.p.lambda_hop ** 2)
 
-    def get_susceptibilities_sc(self, M: float, Q: float, Delta_s: complex, Delta_d: complex, n_kspace: float, mu: float, g_t: float, g_J: float, q: np.ndarray, Gamma_M: float, q_renorm: float, E_k_cache: tuple, apply_diamagnetic_QQ: bool = False) -> Tuple[float, float, float]:
+    def get_susceptibilities_sc(self, M: float, Q: float, Delta_s: complex, Delta_d: complex, n_kspace: float, mu: float, g_t: float, g_J: float, q: np.ndarray, Gamma_M: float, r_Q: float, E_k_cache: tuple, apply_diamagnetic_QQ: bool = False) -> Tuple[float, float, float]:
         """
         SC-state spin–quadrupole cross-susceptibility χ_{Sz, ∂H/∂Q}^SC(q).
 
@@ -1668,7 +1699,7 @@ class RMFT_Solver:
         chi_SS_cplx = self._compute_nambu_susceptibility(E_k_all, M_A_bands, M_B_bands, shift_idx, eta)
 
         # ∂H/∂Q vertex, both roles
-        M_A_bands_SQ, M_B_bands_SQ = self.build_dHdQ_band_basis(M, Q, n_kspace, mu, g_t, g_J, q_renorm, V_k_all, V_kQ)
+        M_A_bands_SQ, M_B_bands_SQ = self.build_dHdQ_band_basis(M, Q, n_kspace, mu, g_t, g_J, r_Q, V_k_all, V_kQ)
 
         # χ_SQ: build the full k-dependent ∂H/∂Q in the 24×24 Nambu basis
         chi_SQ_cplx = self._compute_nambu_susceptibility(E_k_all, M_A_bands,    M_B_bands_SQ, shift_idx, eta)
@@ -1735,12 +1766,12 @@ class RMFT_Solver:
         nx = int(round(q[0] / dk)) % _NK
         ny = int(round(q[1] / dk)) % _NK
         # The selection rule chi_SQ = 0 in D4h is numerically enforced by the odd-in-k integrand cancellation
-        chi0 = _lindhard_bubble(_NORMAL_SECTOR_PAIRS, E_k_all, V_k_all, f_k_all, self.shift_table[nx, ny], self.k_weights_mbz, eta, self.kT)
+        chi0 = _lindhard_bubble(_NORMAL_SECTOR_PAIRS, E_k_all, V_k_all, f_k_all, self.shift_table[nx, ny], self.k_weights, eta, self.kT)
 
         if _enforce_c4:
-            chi0 += _lindhard_bubble(_NORMAL_SECTOR_PAIRS, E_k_all, V_k_all, f_k_all, self.shift_table[(-ny) % _NK,   nx  % _NK], self.k_weights_mbz, eta, self.kT)
-            chi0 += _lindhard_bubble(_NORMAL_SECTOR_PAIRS, E_k_all, V_k_all, f_k_all, self.shift_table[(-nx) % _NK, (-ny) % _NK], self.k_weights_mbz, eta, self.kT)
-            chi0 += _lindhard_bubble(_NORMAL_SECTOR_PAIRS, E_k_all, V_k_all, f_k_all, self.shift_table[  ny  % _NK, (-nx) % _NK], self.k_weights_mbz, eta, self.kT)
+            chi0 += _lindhard_bubble(_NORMAL_SECTOR_PAIRS, E_k_all, V_k_all, f_k_all, self.shift_table[(-ny) % _NK,   nx  % _NK], self.k_weights, eta, self.kT)
+            chi0 += _lindhard_bubble(_NORMAL_SECTOR_PAIRS, E_k_all, V_k_all, f_k_all, self.shift_table[(-nx) % _NK, (-ny) % _NK], self.k_weights, eta, self.kT)
+            chi0 += _lindhard_bubble(_NORMAL_SECTOR_PAIRS, E_k_all, V_k_all, f_k_all, self.shift_table[  ny  % _NK, (-nx) % _NK], self.k_weights, eta, self.kT)
             chi0 *= 0.25
 
         chi0_tensor = chi0.real   # static Δ=0 Lindhard
@@ -1782,7 +1813,7 @@ class RMFT_Solver:
         chi_SS = chi_SS / max((1.0 + Gamma_M * chi_SS), _MATH_EPS)
         return chi_SS, chi_SQ, chi_QS, chi_QQ
     
-    def _rpa_det(self, J: float, V: float, chi_SS_moriya: float, chi_SQ_v: float, chi_QS_v: float, chi_QQ_renorm: float, U_SQ: float = 0.0):
+    def _rpa_det(self, J: float, V: float, chi_SS_moriya: float, chi_SQ_v: float, chi_QS_v: float, chi_Qr_Q: float, U_SQ: float = 0.0):
         """
         det(I − U·χ₀), with the bare interaction matrix U = [[J, U_SQ], [U_SQ, V]].
 
@@ -1792,13 +1823,13 @@ class RMFT_Solver:
         (spin, JT) channel basis — U_SQ=0 silently throws that interaction away.
         """
         a = 1.0 - (J * chi_SS_moriya + U_SQ * chi_QS_v)
-        b = -(J * chi_SQ_v + U_SQ * chi_QQ_renorm)
+        b = -(J * chi_SQ_v + U_SQ * chi_Qr_Q)
         c = -(U_SQ * chi_SS_moriya + V * chi_QS_v)
-        d = 1.0 - (U_SQ * chi_SQ_v + V * chi_QQ_renorm)
+        d = 1.0 - (U_SQ * chi_SQ_v + V * chi_Qr_Q)
         return a * d - b * c, a, b, c, d
 
-    def _rpa_vertex(self, J: float, V: float, chi_SS_moriya: float, chi_SQ_v: float, chi_QS_v: float, chi_QQ_renorm: float, V_cap: float, U_SQ: float = 0.0) -> float:
-        det, a, b, c, d = self._rpa_det(J, V, chi_SS_moriya, chi_SQ_v, chi_QS_v, chi_QQ_renorm, U_SQ)
+    def _rpa_vertex(self, J: float, V: float, chi_SS_moriya: float, chi_SQ_v: float, chi_QS_v: float, chi_Qr_Q: float, V_cap: float, U_SQ: float = 0.0) -> float:
+        det, a, b, c, d = self._rpa_det(J, V, chi_SS_moriya, chi_SQ_v, chi_QS_v, chi_Qr_Q, U_SQ)
 
         M_frob    = math.sqrt(a*a + b*b + c*c + d*d)  # Frobenius norm sets natural scale of matrix
         det_floor = max(_MATH_EPS, 1e-4 * M_frob)
@@ -1813,8 +1844,8 @@ class RMFT_Solver:
         i11 =  a / det_safe
 
         rss = i00 * chi_SS_moriya + i01 * chi_QS_v
-        rqq = i10 * chi_SQ_v      + i11 * chi_QQ_renorm
-        rsq = i00 * chi_SQ_v      + i01 * chi_QQ_renorm
+        rqq = i10 * chi_SQ_v      + i11 * chi_Qr_Q
+        rsq = i00 * chi_SQ_v      + i01 * chi_Qr_Q
         rqs = i10 * chi_SS_moriya + i11 * chi_QS_v
         Vp  = J**2 * rss + V**2 * rqq + J * V * (rsq + rqs)
 
@@ -1831,174 +1862,269 @@ class RMFT_Solver:
         V_cap   = _RPA_V_CAP_ALPHA * max(_RPA_BW_FACTOR * max(abs(tx), abs(ty), 1e-6), J_eff)  # BEC boundary (8t), UV cap on the RPA pairing vertex
         return Gamma_M, V_JT, V_cap
 
-    @staticmethod
-    def _fs_integration_weights(pts: np.ndarray, vF_arr: np.ndarray) -> np.ndarray:
-        """
-        Integration weight w_i = dl_i / ( (2π)² · |vF_i| ) for each Fermi surface point.
-        The proper FS integration measure for a 2D BZ is:
-            ∫_{FS} dS / |vF|  ≈  Σ_i dl_i / |vF_i|
-        where dl_i is the arc-length element around the FS contour.
-        
-        The returned weight includes the BZ area normalisation (2π)² so that:
-            Σ_i w_i · f(k_i)  ≈  ∫_{BZ} d²k f(k) δ(ε_k)
-        """
-        N = len(pts)
-        angles     = np.arctan2(pts[:, 1], pts[:, 0])
-        sort_idx   = np.argsort(angles)
-        sorted_pts = pts[sort_idx]
-        diff_prev  = sorted_pts - np.roll(sorted_pts,  1, axis=0)
-        diff_next  = sorted_pts - np.roll(sorted_pts, -1, axis=0)
-        dl_sorted  = 0.5 * (np.linalg.norm(diff_prev, axis=1)
-                           + np.linalg.norm(diff_next, axis=1))
-        dl = np.empty(N)
-        dl[sort_idx] = dl_sorted
-        return dl / (_BZ_NORM * np.maximum(np.abs(vF_arr), _VF_FLOOR_TIGHT))
-
-    def solve_linearized_gap_equation(self, M: float, Q: float, n_kspace: float, mu: float, g_t: float, g_J: float, g_Delta_s: float, g_Delta_d: float, J_eff: float, Gamma_M: float, V_JT: float, V_cap: float, _fs_precomputed: tuple = None) -> Dict:
-        """
-        Linearised gap equation as an eigenvalue problem on the Fermi surface:
-            λ Δ(k_i) = Σ_j Γ_ij Δ(k_j),   Γ_ij = √(dl_i·dl_j/(vFi·vFj)) · V(k_i−k_j)
-        
-        Pure normal-state (Δ=0) construction — no dependence on a converged SC gap.
-        Returns lambda_lin_max, gap_vector, fs_pts plus the raw kernel/basis objects
-        (Gamma_bare, Gamma_JT_bare, psi_s, psi_d, fs_idx/ev/ec) so that an SCF-side
-        post-processor can build gap-amplitude-dependent diagnostics (s-d mixing,
-        coherence length) without re-diagonalising the FS kernel.
-        """
-        vbdg = self._get_vbdg()
-        # FS points
-        if _fs_precomputed is not None:
-            fs_pts, vF_arr = _fs_precomputed
-            fs_idx, ev, ec = None, None, None
-        else:
-            fs_pts, vF_arr, fs_idx, ev, ec = self._get_fs_points(M, Q, n_kspace, mu, g_t, g_J, store_cache=True, compute_vF=True)
+    def _build_fs_vertex_matrices(self, M: float, Q: float, n_kspace: float, mu: float, g_t: float, g_J: float, J_eff: float, Gamma_M: float, V_JT: float, V_cap: float, prefer_dwave: bool, enforce_c4: bool = False) -> dict:
+        """Build the full and JT-only RPA vertex matrices on a given set of Fermi-surface points."""
+        # --- Fermi-surface points ---
+        fs_pts, vF_arr, fs_idx, ev, ec = self._get_fs_points(M, Q, n_kspace, mu, g_t, g_J, store_cache=True, compute_vF=True, prefer_dwave=prefer_dwave)
         N_fs = len(fs_pts)
+        inv_vF = _fs_integration_weights(fs_pts, vF_arr)
+        i_idx, j_idx, unique_q, inv_idx = _unique_q_pairs(fs_pts)
 
-        _inv_vF = self._fs_integration_weights(fs_pts, vF_arr)
-        i_idx, j_idx, unique_q, inv_idx = self._unique_q_pairs(fs_pts)
-        
         # Build the χ₀ cache once for the normal state
         chi_QQ_bare = self._chi_QQ_matrix_elements(M, Q, 0.0j, 0.0j, n_kspace, mu, g_t, g_J)
-        E_k_cache_normal = self._get_chi0_norm_cache(M, Q, n_kspace, mu, g_t, g_J, vbdg)
-
-        # For each unique q, evaluate V(q).
+        E_k_cache_normal = self._get_chi0_norm_cache(M, Q, n_kspace, mu, g_t, g_J, self._get_vbdg())
+        
         n_q = len(unique_q)
-        V_unique = np.empty(n_q)
-        V_spin_u = np.empty(n_q)
-        V_jt_u   = np.empty(n_q)
+        V_unique = np.empty(n_q, dtype=float)
+        V_spin_u = np.empty(n_q, dtype=float)
+        V_jt_u   = np.empty(n_q, dtype=float)
 
-        enforce_c4 = (abs(Q) < 1e-3 * self.p.lambda_hop)
         for u_idx, q_u in enumerate(unique_q):
             chi_SS, chi_SQ, chi_QS, chi_QQ = self.get_susceptibilities_normal(q_u, Gamma_M, chi_QQ_bare, E_k_cache_normal, enforce_c4)
             V_unique[u_idx] = self._rpa_vertex(J_eff, V_JT, chi_SS, chi_SQ, chi_QS, chi_QQ, V_cap)
             V_spin_u[u_idx] = self._rpa_vertex(J_eff, 0.0,  chi_SS, chi_SQ, chi_QS, chi_QQ, V_cap)
             V_jt_u[u_idx]   = self._rpa_vertex(0.0,   V_JT, chi_SS, chi_SQ, chi_QS, chi_QQ, V_cap)
 
-        V_spin_mean  = float(np.mean(V_spin_u))
-        V_jt_mean    = float(np.mean(V_jt_u))
-        V_rpa_mean   = float(np.mean(V_unique))
-        V_cross_mean = V_rpa_mean - V_spin_mean - V_jt_mean
-
-        # Build bare vertex matrices (only upper triangle)
+        # Build symmetric matrices
         V_ij_full = np.zeros((N_fs, N_fs), dtype=float)
         V_ij_full[i_idx, j_idx] = V_unique[inv_idx]
-        V_ij_full = 0.5 * (V_ij_full + V_ij_full.T)  # enforce exact Hermiticity
-        
+        V_ij_full = 0.5 * (V_ij_full + V_ij_full.T)
+
         V_ij_jt = np.zeros((N_fs, N_fs), dtype=float)
         V_ij_jt[i_idx, j_idx] = V_jt_u[inv_idx]
         V_ij_jt = 0.5 * (V_ij_jt + V_ij_jt.T)
 
-        # Build bare kernel matrices with arc-length weights
-        W_mat = np.outer(np.sqrt(_inv_vF), np.sqrt(_inv_vF))
-        # Full kernel matrices and solve bare eigenvalue problem
-        Gamma_bare    = W_mat * V_ij_full
-        Gamma_JT_bare = W_mat * V_ij_jt
-        eigvals_bare, eigvecs_bare = np.linalg.eigh(Gamma_bare)
-        lambda_bare = float(eigvals_bare[-1])
-        gap_vector  = eigvecs_bare[:, -1]   # ψ_i = φ_i · √(dl_i/vF_i) in the weighted basis
+        return {
+            'fs_pts':    fs_pts,
+            'vF_arr':    vF_arr,
+            'inv_vF':    inv_vF,
+            'fs_idx':    fs_idx,
+            'ev':        ev,
+            'ec':        ec,
+            'V_ij_full': V_ij_full,
+            'V_ij_jt':   V_ij_jt,
+            'V_unique':  V_unique,
+            'V_spin_u':  V_spin_u,
+            'V_jt_u':    V_jt_u,
+            'unique_q':  unique_q,
+            'inv_idx':   inv_idx,
+            'i_idx':     i_idx,
+            'j_idx':     j_idx,
+        }
 
-        # Basis functions — in the weighted basis: ψ_a_i = φ_a(k_i) · √(dl_i/vF_i)
-        # The projection overlap <ψ|ψ_a> is correct in L2 because both sides share the same sqrt weight.
-        sqrt_inv_vF = np.sqrt(_inv_vF)
-        phi_s_raw   = np.ones(N_fs)
-        phi_d_raw   = np.cos(fs_pts[:, 0]) - np.cos(fs_pts[:, 1])
-        psi_s = phi_s_raw * sqrt_inv_vF;  psi_s /= max(np.linalg.norm(psi_s), 1e-12)
-        psi_d = phi_d_raw * sqrt_inv_vF;  psi_d /= max(np.linalg.norm(psi_d), 1e-12)
+    def compute_pairing_kernel_and_build_cache(self, M: float, Q: float, n_kspace: float, mu: float, g_t: float, g_J: float, g_Delta_s: float, g_Delta_d: float, J_eff: float, Gamma_M: float, V_JT: float, V_cap: float, det_afm_sc: float = 1.0, solve_state: '_SolveState' = None) -> Dict:
+        """
+        Compute basis functions, channel scalars (V_s, V_d), the 2x2 pairing kernel K_pair, and related diagnostics from the pre-built RPA vertex matrices on the d- and s-FS.
+        The kernel is reduced to the 2D subspace spanned by phi_s=1 and phi_d=cos(kx)-cos(ky), yielding a 2×2 matrix
+          K = [[g_s V_ss, sqrt(g_s g_d) V_sd],
+               [sqrt(g_s g_d) V_sd, g_d V_dd]]
+        whose larger eigenvalue is lambda_lin_max.
+        If solve_state is None, the V_d EMA is skipped; used in linearized solve as a 2×2 eigenvalue problem in the (s,d) channel subspace.
+          s-channel: uses JT-phonon vertex only (V_jt), with Gutzwiller factor g_Delta_s = g_t.
+          d-channel: uses full RPA vertex (spin+JT+cross), with g_Delta_d = g_t + (g_J-g_t)*p_7.
+        """
+        # Build vertex matrices on the two FS sets
+        vdata_d = self._build_fs_vertex_matrices(M, Q, n_kspace, mu, g_t, g_J, J_eff, Gamma_M, V_JT, V_cap, prefer_dwave=True, enforce_c4=False)   # enforce_c4=(abs(Q) < 1e-3 * self.p.lambda_hop)
+        vdata_s = self._build_fs_vertex_matrices(M, Q, n_kspace, mu, g_t, g_J, J_eff, Gamma_M, V_JT, V_cap, prefer_dwave=False, enforce_c4=False)
 
-        # Project gap vector onto s- and d-wave channels (L2 inner product in weighted basis)
-        w = np.abs([gap_vector @ psi_s, gap_vector @ psi_d])
+        # ---- unpack d-FS data ----
+        V_ij_full = vdata_d['V_ij_full']
+        V_ij_jt_d = vdata_d['V_ij_jt']
+        unique_q  = vdata_d['unique_q']
+        V_unique  = vdata_d['V_unique']
+        V_spin_u  = vdata_d['V_spin_u']
+        V_jt_u    = vdata_d['V_jt_u']
+        i_idx     = vdata_d['i_idx']
+        j_idx     = vdata_d['j_idx']
+        inv_vF_d  = vdata_d['inv_vF']
+        fs_pts_d  = vdata_d['fs_pts']
+        fs_idx    = vdata_d['fs_idx']
+        vF_arr    = vdata_d['vF_arr']
+        ev        = vdata_d['ev']
+        ec        = vdata_d['ec'] 
 
-        # Apply channel-specific Gutzwiller renormalization and determine dominant symmetry.
-        # Use the 2nd-largest eigenvalue channel separation: project gap_vector onto s and d to find which symmetry drives the dominant eigenvalue.
-        if w[1] > w[0]:
-            lambda_lin_max = g_Delta_d * lambda_bare
+        # ---- unpack s-FS data ----
+        inv_vF_s  = vdata_s['inv_vF']
+        fs_pts_s  = vdata_s['fs_pts']
+        V_ij_jt_s = vdata_s['V_ij_jt']
+
+        # ---- basis functions ----
+        phi_d   = np.cos(fs_pts_d[:, 0]) - np.cos(fs_pts_d[:, 1])
+        phi_s_d = np.ones(len(fs_pts_d), dtype=float)       # constant on d-FS (for K12)
+        phi_s_s = np.ones(len(fs_pts_s), dtype=float)       # constant on s-FS (for K11)
+
+        sqrt_inv_vF_d = np.sqrt(inv_vF_d)
+        sqrt_inv_vF_s = np.sqrt(inv_vF_s)
+
+        # weighted kernel matrices
+        W_mat_d = np.outer(sqrt_inv_vF_d, sqrt_inv_vF_d)
+        W_mat_s = np.outer(sqrt_inv_vF_s, sqrt_inv_vF_s)
+
+        # ---- helper for FS averages ----
+        def _fs_avg(phi_a, phi_b, V_ij, W):
+            return float(phi_a @ (V_ij * W) @ phi_b)
+
+        # ---- normalisation factors ----
+        ns = max(float(np.dot(phi_s_s**2, inv_vF_s)), 1e-12)
+        nd = max(float(np.dot(phi_d**2,     inv_vF_d)), 1e-12)
+
+        # ---- 2x2 pairing kernel (K11, K22, K12) ----
+        K11 = g_Delta_s * _fs_avg(phi_s_s, phi_s_s, V_ij_jt_s, W_mat_s) / ns
+        K22 = g_Delta_d * _fs_avg(phi_d,   phi_d,   V_ij_full, W_mat_d) / nd
+        K12 = (math.sqrt(max(g_Delta_s * g_Delta_d, 0.0))
+            * _fs_avg(phi_s_d, phi_d, V_ij_jt_d, W_mat_d)
+            / max(math.sqrt(ns * nd), 1e-12))
+
+        K_pair = np.array([[K11, K12], [K12, K22]], dtype=float)
+        eigvals, eigvecs = np.linalg.eigh(K_pair)
+        lambda_lin_max = float(eigvals[-1])
+        v_s_raw = float(eigvecs[0, -1])
+        v_d_raw = float(eigvecs[1, -1])
+
+        # ---- weighted basis for Rayleigh projections (on d-FS) ----
+        phi_s_w = phi_s_d * sqrt_inv_vF_d
+        phi_d_w = phi_d   * sqrt_inv_vF_d
+        phi_s_norm = max(float(np.dot(phi_s_w, phi_s_w)), 1e-12)
+        phi_d_norm = max(float(np.dot(phi_d_w, phi_d_w)), 1e-12)
+
+        # ---- channel scalars (V_s, V_d) ----
+        V_s_scalar = float(phi_s_w @ V_ij_jt_d @ phi_s_w) / phi_s_norm
+        V_s_scalar = float(np.clip(V_s_scalar, -V_cap, V_cap))
+
+        V_d_proj   = phi_d_w @ V_ij_full
+        V_d_scalar = float(np.dot(phi_d_w, V_d_proj)) / phi_d_norm
+        V_d_scalar = float(np.clip(V_d_scalar, -V_cap, V_cap))
+
+        # --- V_d EMA: only if solve_state is provided (only in non-linear SCF) ---
+        if solve_state is not None:
+            if solve_state.V_d_ema is None:
+                solve_state.V_d_ema = V_d_scalar
+            else:
+                sign_flipped = (V_d_scalar * solve_state.V_d_ema < 0.0
+                                and abs(solve_state.V_d_ema) > _V_PREV_SIGN_FLOOR)
+                if sign_flipped:
+                    if V_d_scalar > 0.0:
+                        _ema_w = _EMA_NEW_WEIGHT
+                    else:
+                        _ema_w = _EMA_NEW_WEIGHT * (_EMA_SIGN_FLIP_W_MIN + (1.0 - _EMA_SIGN_FLIP_W_MIN)
+                                                    / (1.0 + math.exp(-_EMA_SIGN_FLIP_SLOPE * (abs(det_afm_sc) / _DET_SIGN_FLIP_SCALE - 0.5))))
+                else:
+                    kick_boost = 2.0 if solve_state._ema_kick_pending else 1.0
+                    _ema_w = min(_EMA_NEW_WEIGHT * kick_boost, 1.0)
+                solve_state._ema_kick_pending = False
+                solve_state.V_d_ema = (1.0 - _ema_w) * solve_state.V_d_ema + _ema_w * V_d_scalar
+                V_d_scalar = solve_state.V_d_ema
+
+        # ---- structure flags for SCF log ----
+        V_flat = V_ij_full[i_idx, j_idx]
+        vmat_low_var   = float(np.std(V_flat)) < _VMAT_LOW_VAR_FRAC * abs(float(np.mean(V_flat))) + 1e-12
+        vmat_same_sign = (float(np.min(V_flat)) > 0.0) or (float(np.max(V_flat)) < 0.0)
+
+        # ---- q-resolved vertex diagnostics ----
+        q_norms = np.linalg.norm(unique_q, axis=1)
+        afm_mask = q_norms > np.pi * _V_AFM_Q_MIN
+        fwd_mask = q_norms < np.pi * _V_FWD_Q_MAX
+        V_afm_mean = float(np.mean(V_unique[afm_mask])) if afm_mask.any() else float('nan')
+        V_fwd_mean = float(np.mean(V_unique[fwd_mask])) if fwd_mask.any() else float('nan')
+        V_neg_frac = float(np.mean(V_unique < 0.0))
+
+        # ---- full weighted basis and cross-term V_sd ----
+        Gamma_JT_bare = W_mat_d * V_ij_jt_d
+        psi_s = phi_s_d * sqrt_inv_vF_d
+        psi_s /= max(np.linalg.norm(psi_s), 1e-12)
+        psi_d = phi_d * sqrt_inv_vF_d
+        psi_d /= max(np.linalg.norm(psi_d), 1e-12)
+
+        V_sd = float(psi_s @ Gamma_JT_bare @ psi_d)
+
+        # ---- JT-only kernel projection of the dominant eigenvector ----
+        V_dd_JT = float(psi_d @ Gamma_JT_bare @ psi_d)
+        K_sd = math.sqrt(max(g_Delta_s * g_Delta_d, 0.0)) * V_sd
+        K2_JT = np.array([[g_Delta_s * V_s_scalar, K_sd],
+                        [K_sd, g_Delta_d * V_dd_JT]], dtype=float)
+        evec_max = np.array([v_s_raw, v_d_raw])
+        lambda_JT_kernel = float(evec_max @ K2_JT @ evec_max)
+
+        gap_vector = v_s_raw * psi_s + v_d_raw * psi_d
+        w = np.abs([v_s_raw, v_d_raw])
+        frac = w / max(w.sum(), 1e-12)
+
+        V_spin_mean = float(np.mean(V_spin_u))
+        V_JT_mean   = float(np.mean(V_jt_u))
+        V_rpa_mean  = float(np.mean(V_unique))
+
+        lambda_gain_rel = (lambda_lin_max - max(K11, K22) / max(abs(lambda_lin_max), 1e-12))
+
+        # ---- assemble vertex cache (will be extended by caller) ----
+        vertex_cache = {
+            'M':               M,
+            'Q':               Q,
+            'fs_pts':          fs_pts_d,
+            'vF_arr':          vF_arr,
+            'fs_idx':          fs_idx,
+            'ev':              ev,
+            'ec':              ec,
+            'V_s_scalar':      V_s_scalar,
+            'V_d_scalar':      V_d_scalar,
+            'V_d_proj':        V_d_proj.copy(),
+            'vmat_low_var':    vmat_low_var,
+            'vmat_same_sign':  vmat_same_sign,
+            'V_afm_mean':      V_afm_mean,
+            'V_fwd_mean':      V_fwd_mean,
+            'V_spin_mean':     V_spin_mean,
+            'V_JT_mean':       V_JT_mean,
+            'V_rpa_mean':      V_rpa_mean,
+            'V_neg_frac':      V_neg_frac,
+            'K_pair_v_s':      v_s_raw,
+            'K_pair_v_d':      v_d_raw,
+            'frac':            frac,
+            'gap_vector':      gap_vector,
+            'K_pair':          K_pair,
+            'V_ij_full':       V_ij_full,
+            'unique_q':        unique_q,
+            'i_idx':           i_idx,
+            'j_idx':           j_idx,
+            'lambda_lin_max':  lambda_lin_max,
+            'lambda_gain_rel': lambda_gain_rel,
+            'lambda_JT_kernel':lambda_JT_kernel,
+        }
+        return vertex_cache
+
+    def scf_gap_diagnostics(self, Delta_s: complex, Delta_d: complex, g_Delta_s: float, g_Delta_d: float, vertex_cache: dict = None) -> Dict:
+        """Diagnostic post-processing of the linearised gap equation results.
+
+        Returns a new dictionary that merges the vertex_cache with additional diagnostics (coherence lengths, channel eigenvalues, etc.).
+        """
+        # ---- Extract data from cache ----
+        fs_pts = vertex_cache['fs_pts']
+        vF_arr = vertex_cache['vF_arr']
+        fs_idx = vertex_cache['fs_idx']
+        ev     = vertex_cache['ev']
+        ec     = vertex_cache['ec']
+        K_pair = vertex_cache['K_pair']
+        frac   = vertex_cache['frac']
+
+        lambda_lin_max = float(vertex_cache['lambda_lin_max'])
+        v_s_raw = float(vertex_cache['K_pair_v_s'])   # s‑channel weight
+        v_d_raw = float(vertex_cache['K_pair_v_d'])   # d‑channel weight
+
+        # ---- determine dominant symmetry ----
+        if abs(v_d_raw) >= abs(v_s_raw):
             gap_symmetry = 'B1g (d-wave)'
             g_delta_dom = g_Delta_d
         else:
-            lambda_lin_max = g_Delta_s * lambda_bare
             gap_symmetry = 'A1g (s-wave)'
             g_delta_dom = g_Delta_s
 
-        lambda_JT_kernel = g_delta_dom * float(np.dot(gap_vector, Gamma_JT_bare @ gap_vector))
+        # ---- Derived quantities ----
+        lambda_s = g_Delta_s * lambda_lin_max * frac[0]
+        lambda_d = g_Delta_d * lambda_lin_max * frac[1]
 
-        return {
-            'w': w,
-            'lambda_lin_max': lambda_lin_max,
-            'lambda_JT_kernel': lambda_JT_kernel,
-            'g_delta_dom': g_delta_dom,
-            'gap_vector': gap_vector,
-            'fs_pts': fs_pts,
-            'vF_arr': vF_arr,
-            'fs_idx': fs_idx,
-            'ev': ev,
-            'ec': ec,
-            'gap_symmetry': gap_symmetry,
-            'V_spin_mean': V_spin_mean,
-            'V_JT_mean': V_jt_mean,
-            'V_cross_mean': V_cross_mean,
-            'V_rpa_mean': V_rpa_mean,
-            'Gamma_bare': Gamma_bare,
-            'Gamma_JT_bare': Gamma_JT_bare,
-            'psi_s': psi_s,
-            'psi_d': psi_d,
-        }
-
-    def scf_gap_diagnostics(self, lin: Dict, Delta_s: complex, Delta_d: complex, g_Delta_s: float, g_Delta_d: float) -> Dict:
-        """
-        The 2×2 s-d K_pair matrix is built for diagnostic purposes (K12 off-diagonal mixing)
-        but all eigenvalue and symmetry results are taken directly from lin — the authoritative
-        full-N_fs diagonalization already performed by solve_linearized_gap_equation.
-
-        Also derives gap_symmetry (with a nonlinear-quench note when the SCF amplitude ratio
-        disagrees with the linear eigenvector) and the SC coherence length ξ.
-        """
-        Gamma_bare   = lin['Gamma_bare']
-        psi_s, psi_d = lin['psi_s'], lin['psi_d']
-        fs_pts, vF_arr = lin['fs_pts'], lin['vF_arr']
-        fs_idx, ev, ec = lin['fs_idx'], lin['ev'], lin['ec']
-        
-        K11 = float(psi_s @ Gamma_bare @ psi_s) / max(psi_s @ psi_s, 1e-12)
-        K22 = float(psi_d @ Gamma_bare @ psi_d) / max(psi_d @ psi_d, 1e-12)
-        K12 = float(psi_s @ Gamma_bare @ psi_d) / max(np.sqrt((psi_s @ psi_s) * (psi_d @ psi_d)), 1e-12)
-        K_pair = np.array([[K11, K12], [K12, K22]])
-        
-        lambda_lin_max = float(lin['lambda_lin_max'])
-        _w = lin['w']                       # shape (2,), entries ≥ 0
-        _w_norm = max(float(_w[0] + _w[1]), 1e-12)
-        v_s = float(_w[0] / _w_norm)       # s-channel projection weight (≥ 0, sums to 1 with v_d)
-        v_d = float(_w[1] / _w_norm)       # d-channel projection weight
-        
-        lambda_2x2 = float(max(g_Delta_s * v_s * K11 + g_Delta_d * v_d * K22, 0.0))
-
-        # Per-channel linearised gap eigenvalues, consistent with lin's Gutzwiller convention.
-        lambda_s = g_Delta_s * v_s * lambda_lin_max / max(g_Delta_s * v_s + g_Delta_d * v_d, 1e-12) if (v_s + v_d) > 1e-12 else 0.0
-        lambda_d = g_Delta_d * v_d * lambda_lin_max / max(g_Delta_s * v_s + g_Delta_d * v_d, 1e-12) if (v_s + v_d) > 1e-12 else 0.0
-        
-        gap_symmetry = lin['gap_symmetry']
+        # Gap symmetry analysis (check for nonlinear quench)
         _Ds_mag, _Dd_mag = abs(Delta_s), abs(Delta_d)
         if _Ds_mag + _Dd_mag > _DELTA_ABS_FLOOR:
             _scf_dom = 'd' if _Dd_mag > _Ds_mag else 's'
-            _lin_dom = 'd' if v_d > v_s else 's'
+            _lin_dom = 'd' if abs(v_d_raw) > abs(v_s_raw) else 's'
             if _scf_dom != _lin_dom:
                 gap_symmetry = gap_symmetry.split(' [')[0]   # strip any old annotation
                 gap_symmetry += f' [lin={_lin_dom}, SCF={_scf_dom}: nonlinear quench]'
@@ -2006,7 +2132,7 @@ class RMFT_Solver:
         # Coherence length — nodal/antinodal decomposition for d-wave validity.
         # For d-wave Δ(k)=Δ_d·(cos kx−cos ky): ξ diverges at nodes, shortest at antinodes.
         # BdG validity (phase coherence) is governed by the NODAL sector (superfluid density ∝ v_F at nodes).
-        # ξ_antinodal is diagnostic for BEC–BCS crossover; ξ_over_a = ξ_nodal for backward compatibility.
+        # ξ_antinodal is diagnostic for BEC–BCS crossover;
         Delta_0 = max(_Ds_mag, 2.0 * _Dd_mag)
         if Delta_0 > 1e-8:
             vF_avg = float(np.mean(vF_arr))
@@ -2040,9 +2166,6 @@ class RMFT_Solver:
                 xi_nodal     = vF_avg / (np.pi * Delta_0)
                 xi_antinodal = xi_nodal
 
-            # ξ_over_a: use nodal value (governs phase coherence and valid_BdG).
-            xi_over_a = xi_nodal
-
             if fs_idx is not None and ev is not None and ec is not None and len(fs_idx) >= _VERTEX_DIAG_MIN_FS:
                 # Full orbital-resolved ξ computation (Γ₆ vs Γ₇ character)
                 window = _FS_SAMPLING * self.kT
@@ -2066,34 +2189,33 @@ class RMFT_Solver:
                 vF_G7 = float(np.average(vF_arr, weights=np.array(w7_arr) + 1e-12))
                 xi_Gamma6 = vF_G6 / (np.pi * Delta_0)
                 xi_Gamma7 = vF_G7 / (np.pi * Delta_0)
-                orbital_selective = abs(xi_Gamma6 - xi_Gamma7) / max(xi_over_a, 1e-12) > _ORBITAL_SEL_FRAC
+                orbital_selective = abs(xi_Gamma6 - xi_Gamma7) / max(xi_nodal, 1e-12) > _ORBITAL_SEL_FRAC
             else:
-                xi_Gamma6 = xi_over_a
-                xi_Gamma7 = xi_over_a
+                xi_Gamma6 = xi_nodal
+                xi_Gamma7 = xi_nodal
                 orbital_selective = False
 
             # BdG validity: nodal coherence length must exceed 2 lattice constants.
             valid_BdG = xi_nodal > _XI_NODAL_MIN
         else:
-            xi_Gamma6 = xi_Gamma7 = xi_over_a = xi_antinodal = vF_avg = 0.0
+            xi_Gamma6 = xi_Gamma7 = xi_nodal = xi_antinodal = vF_avg = 0.0
             valid_BdG = False
             orbital_selective = False
 
-        result = dict(lin)
+        # ---- Assemble result (vertex cache + new diagnostics) ----
+        result = dict(vertex_cache)
         result.update({
-            'lambda_2x2': lambda_2x2,
             'lambda_s': lambda_s,
             'lambda_d': lambda_d,
-            'v_s': float(v_s),
-            'v_d': float(v_d),
-            'K_pair': K_pair,
             'xi_Gamma6': xi_Gamma6,
             'xi_Gamma7': xi_Gamma7,
-            'xi_over_a': xi_over_a,
+            'xi_nodal': xi_nodal,
             'xi_antinodal': xi_antinodal if Delta_0 > 1e-8 else 0.0,
             'vF_avg': vF_avg,
             'valid_BdG': valid_BdG,
             'orbital_selective': orbital_selective,
+            'gap_symmetry': gap_symmetry,
+            'g_delta_dom': g_delta_dom,
         })
         return result
         
@@ -2163,7 +2285,7 @@ class RMFT_Solver:
         H -= np.diag(h_z)   # h_z has _N_ORB=6 entries: 6↑,6↓,7a↑,7a↓,7b↑,7b↓
         return H
     
-    def _find_mu_for_density(self, M: float, Q: float, Delta_s: complex, Delta_d: complex, target_doping: float, mu_guess: float, t_eff: float, g_t: float, g_J: float, q_renorm: float = 0.0, F67s_mf: float = 0.0) -> Tuple[float, float]:
+    def _find_mu_for_density(self, M: float, Q: float, Delta_s: complex, Delta_d: complex, target_doping: float, mu_guess: float, t_eff: float, g_t: float, g_J: float, r_Q: float = 0.0, F67s_mf: float = 0.0) -> Tuple[float, float]:
         """
         Find the chemical potential μ such that the BdG electron density satisfies n(μ) = 1 − target_doping.
         The cheap estimator: ∂n/∂μ ≈ Σₖ,ₙ wₖ f(Eₙ)[1−f(Eₙ)]/kT
@@ -2181,7 +2303,7 @@ class RMFT_Solver:
 
         def _diag_and_density(mu_val: float) -> Tuple[np.ndarray, np.ndarray, float]:
             ev, ec = np.linalg.eigh(
-                vbdg._build_H_stack(vbdg._kpts, M, Q, Delta_s, Delta_d, target_n, mu_val, g_t, g_J, q_renorm, F67s_mf, out=vbdg._H_stack)
+                vbdg._build_H_stack(vbdg._kpts, M, Q, Delta_s, Delta_d, target_n, mu_val, g_t, g_J, r_Q, F67s_mf, out=vbdg._H_stack)
             )
             dens = self._compute_orbital_densities(ev, ec)
             n_total = np.sum(dens)
@@ -2328,15 +2450,15 @@ class RMFT_Solver:
         # 0.25 corrects for 2 (sublattices) * 2 (Nambu particle-hole doubling) to yield per-site energy
         return 0.25 * Omega_cell + elastic_energy + condensation + E_mf_correction
     
-    def compute_cluster_free_energy(self, M_ext: float, Q: float, n_kspace: float, tx_bare: float, ty_bare: float, mu: float, g_J: float, q_renorm: float, F67s_mf: float) -> Dict:
+    def compute_cluster_free_energy(self, M_ext: float, Q: float, n_kspace: float, tx_bare: float, ty_bare: float, mu: float, g_J: float, J_A1g_diag: np.ndarray, J_B1g_bare: float, F67s_mf: float, verbose: bool) -> Dict:
         """
         Cluster exact diagonalization for the SC state (Δ≠0) with two-channel (SC-induced JT + spin–JT cross) vertex renormalisation.
 
         The cluster Hamiltonian is built in the [Γ₆↑,Γ₆↓,Γ₇↑,Γ₇↓]⊗[A,B] basis:
 
             H = H_A⊗I + I⊗H_B                  [local SP + AFM Weiss + JT + F67s_mf]
-              + J_bond_M_bare·(O_A⊗O_B)         [A1g magnetic exchange]
-              + J_B1g_bare·(B1g_A⊗B1g_B)    [B1g orbital exchange, Q≠0 only]
+                + J_bond_M_bare·(O_A⊗O_B)         [A1g magnetic exchange]
+                + J_B1g_bare·(B1g_A⊗B1g_B)        [B1g orbital exchange, Q≠0 only]
 
         local BDG Hamiltonian already contains: −μ, Δ_CF, AFM Weiss (J_A1g·sign_M·M), JT (g_JT·Q·B1g),
         and the anomalous Weiss field (J_B1g·F67s_mf, Q≠0 only).
@@ -2356,22 +2478,19 @@ class RMFT_Solver:
         A pure S_z operator would commute with H_cluster, forcing corr_MQ = 0 exactly. However, multi_op weights the Γ₆ and Γ₇ sectors differently, making [O, H_cluster] and hence corr_MQ small but nonzero.
 
         Slopes give:
-            J_Q  → SC-induced B1g exchange    (q_renorm = J_Q  / J_B1g_bare)
-            J_MQ → spin–JT cross-coupling     (r_MQ     = J_MQ / sqrt(J_bond_M_bare·J_B1g_bare))
+            J_Q  → SC-induced B1g exchange    (r_Q  = J_Q  / J_B1g_bare)
+            J_MQ → spin–JT cross-coupling     (r_MQ = J_MQ / sqrt(J_bond_M_bare·J_B1g_bare))
         
         The J_B1g_bare·(B1g_A⊗B1g_B) exchange term is included when Q≠0: in the SC state the Bogoliubov mixing activates χ_SQ,
         making this channel physically active even though it vanishes in the normal state by symmetry. Omitting it would introduce a systematic bias in J_Q_fit.
         """
-        # ── 1. Bare exchange couplings (single bond, no Z) ───────────────────────
-        J_A1g_diag, J_B1g_bare = self.p.exchange_channels(Q, n_kspace, tx_bare, ty_bare, g_J, q_renorm)
-        
-        # ── 2. Single-particle + Weiss + JT + F67s Hamiltonians ─────────────────
+        # ── 1. Single-particle + Weiss + JT + F67s Hamiltonians ─────────────────
         H_JT = (self.p.g_JT * Q) * self.B1g_op
         H_TRW = (self.p.Z * J_B1g_bare * F67s_mf) * self.B1g_offdiag
         H_A = self.build_local_hamiltonian_for_bdg(+1.0, M_ext, J_A1g_diag, mu) + H_JT - H_TRW
         H_B = self.build_local_hamiltonian_for_bdg(-1.0, M_ext, J_A1g_diag, mu) + H_JT + H_TRW
 
-        # ── 3. Magnetic and orbital exchange ─────────────────────────────────────
+        # ── 2. Magnetic and orbital exchange ─────────────────────────────────────
         # J_bond_M_bare: single-bond A1g magnetic exchange (Gutzwiller-renormalised, no Z factor here)
         J_bond_M_bare = J_A1g_diag[0]
         H_exch = J_bond_M_bare * np.kron(self.multi_op, self.multi_op)
@@ -2379,17 +2498,17 @@ class RMFT_Solver:
             # B1g orbital exchange: active in the SC state because Bogoliubov mixing opens χ_SQ (Section 11); omitting it biases J_Q_fit.
             H_exch += J_B1g_bare * np.kron(self.B1g_op, self.B1g_op)
 
-        # ── 4. Full cluster Hamiltonian (2-site, 6 orbitals/site ⇒ 36×36) ────
+        # ── 3. Full cluster Hamiltonian (2-site, 6 orbitals/site ⇒ 36×36) ────
         I6 = np.eye(_N_ORB, dtype=complex)
         H_cluster = np.kron(H_A, I6) + np.kron(I6, H_B) + H_exch
         H_cluster = 0.5 * (H_cluster + H_cluster.conj().T)   # numerical Hermiticity
         evals, evecs = np.linalg.eigh(H_cluster)
 
-        # ── 5. Free energy ────────────────────────────────────────────────────────
+        # ── 4. Free energy ────────────────────────────────────────────────────────
         _bweights = np.exp(-(evals - evals[0]) / self.kT)
         F_total   = evals[0] - self.kT * np.log(_bweights.sum())
 
-        # ── 6. Operators in the 36×36 space ──────────────────────────────────────
+        # ── 5. Operators in the 36×36 space ──────────────────────────────────────
         O_A = np.kron(self.multi_op, I6)
         O_B = np.kron(I6, self.multi_op)
         B_A = np.kron(self.B1g_op,  I6)
@@ -2404,18 +2523,18 @@ class RMFT_Solver:
         bA = _state_expect(B_A)
         bB = _state_expect(B_B)
 
-        # ── 7. Connected correlators (state-by-state) ─────────────────────────────
+        # ── 6. Connected correlators (state-by-state) ─────────────────────────────
         corr_Q  = _state_expect(B_A @ B_B) - bA * bB
         corr_MQ = _state_expect(0.5*(O_A@B_B + B_A@O_B)) - 0.5*(oA*bB + bA*oB)
 
-        # ── 8. Weiss-field decontamination ────────────────────────────────────────
+        # ── 7. Weiss-field decontamination ────────────────────────────────────────
         # Subtract the MF (mean-field) energy so the residual evals_int carries only the quantum fluctuation content
         evals_int = evals.copy()
         evals_int -= J_bond_M_bare * oA * oB
         if abs(Q) > 1e-8:
             evals_int -= J_B1g_bare * bA * bB
 
-        # ── 9. Fit temperature and Boltzmann weights ──────────────────────────────
+        # ── 8. Fit temperature and Boltzmann weights ──────────────────────────────
         # T_floor: at least 2×kT and 15% of kinetic scale to prevent a single near-degenerate state from dominating the regression (see _T_floor analysis).
         _kin_scale = np.sqrt(0.5 * (tx_bare**2 + ty_bare**2))
         _T_floor   = max(2.0*self.kT, 0.15*_kin_scale, 1e-3)
@@ -2433,7 +2552,7 @@ class RMFT_Solver:
         corr_MQ_f = corr_MQ[valid_mask]
         E_f       = evals_int[valid_mask]
 
-        # ── 10. Two-channel weighted multivariate linear regression (WMLR) ─────────
+        # ── 9. Two-channel weighted multivariate linear regression (WMLR) ─────────
         cQ  = np.sum(fit_w * corr_Q_f)
         cMQ = np.sum(fit_w * corr_MQ_f)
         cE  = np.sum(fit_w * E_f)
@@ -2476,10 +2595,8 @@ class RMFT_Solver:
                 except Exception:
                     pass
 
-        # ── 11. Renormalisation factors ────────────────────────────────────────────
-        # Normalise by J_B1g_bare (the single-bond B1g bare coupling) so that r_Q is dimensionless and directly maps to the (1+r_Q) factor:
-        #   J_B1g_eff = Z · J_CT · sinh(2Q/λ) · η_J · (1 + r_Q)
-        #             = J_B1g_bare · (1 + r_Q)
+        # ── 10. Renormalisation factors ────────────────────────────────────────────
+        # Normalise by J_B1g_bare (the single-bond B1g bare coupling) so that r_Q is dimensionless and directly maps to the (1+r_Q) factor;
         # This is internally consistent: evals_int has J_B1g_bare·B1g⊗B1g subtracted, the regression slope J_Q carries units of energy/[B1g²]
         Q_bare_scale = max(abs(J_B1g_bare), _REGR_EPS)
         M_bare       = max(abs(J_bond_M_bare), _REGR_EPS)
@@ -2491,19 +2608,16 @@ class RMFT_Solver:
         r_Q  = float(np.clip(r_Q,  -2.0, 2.0))
         r_MQ = float(np.clip(r_MQ, -2.0, 2.0))
 
-        if not _regression_solved:
+        if not _regression_solved or abs(J_Q) < 1e-6:
             # no JT-sector signal can be reliably extracted
             r_Q = 0.0;  r_MQ = 0.0
         else:
-            # ── 12. Independent t-statistic significance tests for r_Q and r_MQ ────
+            # ── 11. Independent t-statistic significance tests for r_Q and r_MQ ────
             _n_channels = 2   # J_Q, J_MQ
             df = max(n_eff - _n_channels, 0.5)   # floor at 0.5 to keep t_crit finite
+            t_crit = float(tdist.ppf(_REGR_T_ALPHA, df))
+            
             res_var = max(np.sum(fit_w * dy * dy) - (J_Q * S_Qy + J_MQ * S_MQy), 0.0)
-            if df > 2.0:
-                t_crit = tdist.ppf(1 - _REGR_T_ALPHA / 2, df)
-            else:
-                t_crit = 4.303   # exact t_{0.975}(df=2); conservative for df<2
-            t_crit = float(np.clip(t_crit, 1.0, 20.0))   # guard df→2 divergence
             # Standard error for each slope uses its own diagonal of the inverse design matrix, which accounts for the Q/MQ collinearity
             try:
                 A_inv = np.linalg.inv(A_mat)
@@ -2516,24 +2630,28 @@ class RMFT_Solver:
                 SE_J_MQ = float('inf')
 
             def _shrink(value: float, J_val: float, SE_J: float, label: str) -> float:
-                if np.isinf(SE_J) or SE_J == 0.0:
-                    return value   # SE undefined or perfect fit: no shrinkage warranted
-                t_stat = abs(J_val) / SE_J
-                conf = float(np.clip(t_stat / t_crit, 0.0, 1.0))
-                if conf < 1.0:
-                    shrunk = value * conf
-                    if conf < 0.9:   # only log non-trivial shrinkage
-                        _scf_log("CLUSTER-ED",
-                                 f"⚠ t={t_stat:.2f} < t_crit={t_crit:.2f} (df={df:.1f}) — "
-                                 f"{label} significance shrinkage (conf={conf:.4f}): "
-                                 f"{value:.4f}→{shrunk:.4f}")
-                    return shrunk
-                return value
+                if not np.isfinite(SE_J):
+                    conf = 0.0
+                    t_stat = 0.0
+                else:
+                    t_stat = abs(J_val) / max(SE_J, np.finfo(float).eps)
+                    xp = (max(t_stat, 0.0) / t_crit) ** _REGR_SHRINK_POWER
+                    conf = xp / (1.0 + xp)
+                shrunk = value * conf
+
+                if verbose and conf < 0.9:
+                    _scf_log(
+                        "CLUSTER-ED",
+                        f"⚠ t={t_stat:.2f} < t_crit={t_crit:.2f} (df={df:.1f}) — "
+                        f"{label} significance shrinkage "
+                        f"(conf={conf:.4f}): {value:.4f}→{shrunk:.4f}"
+                    )
+                return shrunk
 
             r_Q  = _shrink(r_Q,  J_Q,  SE_J_Q,  "r_Q")
             r_MQ = _shrink(r_MQ, J_MQ, SE_J_MQ, "r_MQ")
 
-        # ── 13. Observables ────────────────────────────────────────────────────────
+        # ── 12. Observables ────────────────────────────────────────────────────────
         bA_mean  = float(np.sum(fit_w * bA[valid_mask]))
         bB_mean  = float(np.sum(fit_w * bB[valid_mask]))
         bA2      = _state_expect(B_A @ B_A)[valid_mask]
@@ -2541,12 +2659,12 @@ class RMFT_Solver:
         bA2_mean = float(np.sum(fit_w * bA2))
         bB2_mean = float(np.sum(fit_w * bB2))
         Q_fluct  = np.sqrt(max(0.0, 0.5*((bA2_mean - bA_mean**2)+(bB2_mean - bB_mean**2))))
+
         return {
             'F_per_site': float(F_total / _CLUSTER_SIZE),
             'r_Q':        r_Q,
             'r_MQ':       r_MQ,
-            'n_eff':      float(n_eff),
-            'J_eff':      self.p.Z * J_A1g_diag[0],
+            'Q_fluct':    Q_fluct,
         }
 
     def _scf_jacobi_kick(self, target_doping: float, initial_M: float, initial_Q: float, initial_Delta: float, g_t: float, g_J: float, g_Delta_s: float, g_Delta_d: float, force_d_wave: bool = False) -> Dict:
@@ -2578,7 +2696,7 @@ class RMFT_Solver:
         J_A1g_diag, _ = self.p.exchange_channels(initial_Q, initial_n_kspace, tx_bare, ty_bare, g_J)
         _J_eff = self.p.Z * J_A1g_diag[0]
         _Gamma_M, _V_JT, _V_cap = self._make_vertex_params(target_doping, tx, ty, g_t, _J_eff, max(self._K_bare, 1e-9))
-        chi_QQ_bare = self._chi_QQ_matrix_elements(0.0, initial_Q, Delta_s, Delta_d, initial_n_kspace, initial_mu, g_t, g_J)
+        chi_QQ_bare = self._chi_QQ_matrix_elements(0.0, initial_Q, 0.0j, 0.0j, initial_n_kspace, initial_mu, g_t, g_J)
         E_k_cache_normal = self._get_chi0_norm_cache(0.0, initial_Q, initial_n_kspace, initial_mu, g_t, g_J, self._get_vbdg())
         chi_SS_afm, _, _, _ = self.get_susceptibilities_normal(np.array([np.pi, np.pi]), _Gamma_M, chi_QQ_bare, E_k_cache_normal, _enforce_c4=False)
         stoner = _J_eff * chi_SS_afm
@@ -2593,27 +2711,29 @@ class RMFT_Solver:
         _ct = self._compute_chi_tau(initial_M, initial_Q, Delta_s, Delta_d, n_kspace, mu, g_t, g_J)
         chi_tau_raw = _ct['chi_tau_net']
         chi_tau_val = max(-chi_tau_raw, 0.0) if (_ct['richardson_ok'] and chi_tau_raw < 0.0) else 0.0
-
+        
         # --- Linearised BdG+RPA eigenproblem ---
-        _lin_seed = self.solve_linearized_gap_equation(initial_M, initial_Q, n_kspace, mu, g_t, g_J, g_Delta_s, g_Delta_d, _J_eff, _Gamma_M, _V_JT, _V_cap)
-        lambda_lin_max = float(_lin_seed['lambda_lin_max'])
-        V_jt = float(_lin_seed['V_JT_mean'])
+        _lin_seed = self.compute_pairing_kernel_and_build_cache(initial_M, initial_Q, n_kspace, mu, g_t, g_J, g_Delta_s, g_Delta_d, _J_eff, _Gamma_M, _V_JT, _V_cap)
 
+        lambda_lin_max = float(_lin_seed['lambda_lin_max'])
         # ---- Jacobi elements ----
         # The actual pairing is driven by the q≈(π,π) backscattering peak, which is exactly what largest eigenvalue of the full FS kernel captures.
         A = lambda_lin_max
-        B_raw = A * (V_jt / max(self.p.Delta_CF, 1e-9)) * (chi_tau_val * np.pi * _t_eff)
-        B_raw = max(0.0, B_raw)
-        B = B_raw / (1.0 + B_raw / max(abs(A), 1e-8))
-        C = V_jt * chi_tau_val
-        # --- Eigenvalue (λ₊) ---
-        disc = A**2 + 4.0 * B * C
-        
+        # Q-mode stiffness based on G₃[2,2] (normal state value, but sufficient in kick)
+        D = max(1.0 - _V_JT * self._chi_QQ_matrix_elements(initial_M, initial_Q, 0.0j, 0.0j, initial_n_kspace, initial_mu, g_t, g_J), 1e-6)  # positive in stable case
+        # Coupling estimation from gap-induced B₁g response
+        B = math.sqrt(_V_JT * abs(chi_tau_val)) * (_t_eff / max(self.p.Delta_CF, 1e-9))
+        B = float(np.clip(B, 0.0, 2.0))
+        J = np.array([[A,    B],
+                      [B,   -D]])
+
+        trace = J[0,0] + J[1,1]
+        det   = J[0,0]*J[1,1] - J[0,1]*J[1,0]
+        disc  = trace**2 - 4.0*det
         if disc >= 0.0:
-            lambda_plus = 0.5 * (A + np.sqrt(disc))
+            lambda_plus = 0.5 * (trace + math.sqrt(disc))
         else:
-            # Complex eigenvalues (B·C < 0): use spectral radius
-            lambda_plus = 0.5 * np.sqrt(A**2 + abs(disc))
+            lambda_plus = 0.5 * math.sqrt(trace**2 + abs(disc))
 
         # --- Regime classification ---
         if lambda_plus < 0.7:
@@ -2633,7 +2753,7 @@ class RMFT_Solver:
         if (lambda_lin_max > _KICK_LAMBDA_SC_THR) and (M_kick > _KICK_M_EXCESS_CTR):
             pull = float(np.clip((lambda_lin_max - _KICK_LAMBDA_SC_THR) / _KICK_LAMBDA_SC_WIDTH, 0.0, _KICK_PULL_CAP))
             M_kick = M_kick - pull * (M_kick - _KICK_M_EXCESS_CTR)
-        M_kick  = float(np.clip(M_kick, _KICK_M_CLIP_LO, _KICK_M_CLIP_HI))
+        M_kick = float(np.clip(M_kick, _KICK_M_CLIP_LO, _KICK_M_CLIP_HI))
 
         # --- Q kick ---
         # If initial_Q is already nonzero, trust it as the best current estimate.
@@ -2657,8 +2777,7 @@ class RMFT_Solver:
         ))
         boost = 1.0 + _KICK_BOOST_AMP * lambda_excess / (1.0 + lambda_excess)
         Delta_kick = float(np.clip(base_scale * boost, 1e-6, 0.3 * _t_eff))
-        w = _lin_seed['w']
-        frac = w / max(w.sum(), 1e-10)
+        frac = _lin_seed['frac']
 
         if force_d_wave:
             Delta_s_kick = 0.0j
@@ -2695,7 +2814,7 @@ class RMFT_Solver:
             'M_phys':          initial_M,
         }
     
-    def _vertex_matrix_at_Q(self, M: float, Qv: float, n_kspace: float, mu: float, g_t: float, g_J: float, g_Delta_s: float, g_Delta_d: float, Gamma_M: float, V_JT: float, V_cap: float, vertex_cache: dict = None) -> Tuple[float, float]:
+    def _vertex_matrix_at_Q(self, M: float, Qv: float, n_kspace: float, mu: float, g_t: float, g_J: float, g_Delta_s: float, g_Delta_d: float, Gamma_M: float, V_JT: float, V_cap: float, det_afm_sc: float, solve_state: '_SolveState') -> Tuple[float, np.array]:
         """
         Evaluate the linearised pairing eigenvalue and diagonal RPA vertex at a trial JT distortion Qv.
 
@@ -2706,34 +2825,13 @@ class RMFT_Solver:
         -------
         lambda_lin_max : float  — largest eigenvalue of the linearised gap kernel at Qv.
         V_diag         : ndarray — diagonal of the N_FS × N_FS vertex matrix (for diagnostics).
-        Both are None if fewer than 4 FS points are found (degenerate / Mott limit).
         """
         tx_b, ty_b = self.p.effective_hopping_anisotropic(Qv)
-        chi_QQ_bare = self._chi_QQ_matrix_elements(M, Qv, 0.0j, 0.0j, n_kspace, mu, g_t, g_J)
-        E_k_cache = self._get_chi0_norm_cache(M, Qv, n_kspace, mu, g_t, g_J, self._get_vbdg())
         J_A1g_diag, _ = self.p.exchange_channels(Qv, n_kspace, tx_b, ty_b, g_J)
         J_eff_v = self.p.Z * J_A1g_diag[0]
 
-        if vertex_cache is not None:
-            _pts, _vF = vertex_cache['fs_pts'], vertex_cache['vF_arr']
-        else:
-            _pts, _vF, _, _, _ = self._get_fs_points(M, Qv, n_kspace, mu, g_t, g_J, store_cache=False, compute_vF=True)
-
-        if len(_pts) < 4:
-            return None, None
-        
-        i_idx, j_idx, unique_q, inv_idx = self._unique_q_pairs(_pts)
-        V_unique = np.empty(len(unique_q))
-        for u, q_u in enumerate(unique_q):
-            chi_SS, chi_SQ, chi_QS, chi_QQ = self.get_susceptibilities_normal(q_u, Gamma_M, chi_QQ_bare, E_k_cache, _enforce_c4=False)
-            V_unique[u] = self._rpa_vertex(J_eff_v, V_JT, chi_SS, chi_SQ, chi_QS, chi_QQ, V_cap)
-
-        V_ij_full = np.zeros((len(_pts), len(_pts)))
-        V_ij_full[i_idx, j_idx] = V_unique[inv_idx]
-        V_ij_full = 0.5 * (V_ij_full + V_ij_full.T)
-
-        lin = self.solve_linearized_gap_equation(M, Qv, n_kspace, mu, g_t, g_J, g_Delta_s, g_Delta_d, J_eff_v, Gamma_M, V_JT, V_cap, _fs_precomputed=(_pts, _vF))
-        return float(lin['lambda_lin_max']), np.diag(V_ij_full)
+        lin = self.compute_pairing_kernel_and_build_cache(M, Qv, n_kspace, mu, g_t, g_J, g_Delta_s, g_Delta_d, J_eff_v, Gamma_M, V_JT, V_cap, det_afm_sc, solve_state)
+        return float(lin['lambda_lin_max']), np.diag(lin['V_ij_full'])
 
     def _classify_scf_dynamics(self, delta_history: list) -> dict:
         """
@@ -2797,7 +2895,7 @@ class RMFT_Solver:
              The 2×2 kernel K_pair is built from (V_s, V_d, V_sd) projections;
              its eigenvector defines the optimal (Δ_s*, Δ_d*) ratio that
              is mixed in with weight _ALPHA_MIX_2X2, preventing artificial channel locking.
-          5. Cluster ED → q_renorm, r_MQ (EMA-smoothed) for JT-sector vertex renormalisation;
+          5. Cluster ED → r_Q, r_MQ (EMA-smoothed) for JT-sector vertex renormalisation;
              J_eff itself comes directly from the analytic Gutzwiller factor each iteration.
           6. Newton step for M (LM-damped, trust-region); blended with the *linearly*-mixed BdG
              fixpoint M_bdg (M is deliberately kept OUT of the Anderson history — see step 8).
@@ -2877,12 +2975,12 @@ class RMFT_Solver:
         _chi_SQ_sc    = 0.0
         _chi_QQ_sc    = 0.0
         _F67s_mf      = 0.0
-        _q_renorm_cur = 0.0    # orbital vertex renormalization
+        _r_Q_cur = 0.0    # orbital vertex renormalization
         _r_MQ_cur     = 0.0    # cross vertex renormalization
         F_cluster     = {'F_per_site': 0.0, 'r_Q': 0.0}
         _det_q0       = _DET_AFM_FLOOR
         _det_afm      = _DET_AFM_FLOOR
-        _det_afm_sc_lin     = _DET_AFM_FLOOR
+        _det_afm_sc   = _DET_AFM_FLOOR
         _alpha_freeze_count = 0
         selection_ratio = 0.0
         _delta_run_hist: list = []
@@ -2892,6 +2990,7 @@ class RMFT_Solver:
         _Gamma_M = 0.0
         _V_JT = 0.0
         _V_cap = 0.0
+        _vbdg = self._get_vbdg()
 
         for iteration in range(_MAX_ITER):
             if force_delta_zero:
@@ -2904,22 +3003,24 @@ class RMFT_Solver:
             _iter_t0 = _time.time()
 
             tx_bare, ty_bare = self.p.effective_hopping_anisotropic(Q)
+            # Bare exchange couplings (single bond, no Z)
+            J_A1g_diag, J_B1g_bare = self.p.exchange_channels(Q, n_kspace, tx_bare, ty_bare, g_J, _r_Q_cur)
+
+            F_cluster = self.compute_cluster_free_energy(M, Q, n_kspace, tx_bare, ty_bare, mu, g_J, J_A1g_diag, J_B1g_bare, _F67s_mf, verbose)
+            _r_Q_cur  = _EMA_NEW_QRW    * F_cluster['r_Q']  + (1.0 - _EMA_NEW_QRW)    * _r_Q_cur
+            _r_MQ_cur = _EMA_NEW_WEIGHT * F_cluster['r_MQ'] + (1.0 - _EMA_NEW_WEIGHT) * _r_MQ_cur
+
+            # J_eff comes exclusively from the analytic Gutzwiller/Kotliar–Ruckenstein exchange renormalisation
+            _J_eff = self.p.Z * J_A1g_diag[0]
             tx, ty = g_t * tx_bare, g_t * ty_bare
             _t_eff_now = np.sqrt(0.5 * (tx**2 + ty**2))
             _Gamma_M, _V_JT, _V_cap = self._make_vertex_params(target_doping, tx, ty, g_t, _J_eff, _K_eff_scf)
 
-            F_cluster = self.compute_cluster_free_energy(M, Q, n_kspace, tx_bare, ty_bare, mu, g_J, _q_renorm_cur, _F67s_mf)
-            _q_renorm_cur = _EMA_NEW_QRW    * F_cluster['r_Q']  + (1.0 - _EMA_NEW_QRW)    * _q_renorm_cur
-            _r_MQ_cur     = _EMA_NEW_WEIGHT * F_cluster['r_MQ'] + (1.0 - _EMA_NEW_WEIGHT) * _r_MQ_cur
-            # J_eff comes exclusively from the analytic Gutzwiller/Kotliar–Ruckenstein exchange renormalisation
-            _J_eff = F_cluster['J_eff']
-
-            _vbdg = self._get_vbdg()
             _bdg_ev_sc, _bdg_ec_sc = np.linalg.eigh(
-                _vbdg._build_H_stack(_vbdg._kpts, M, Q, Delta_s, Delta_d, n_kspace, mu, g_t, g_J, _q_renorm_cur, _F67s_mf, out=_vbdg._H_stack)
+                _vbdg._build_H_stack(_vbdg._kpts, M, Q, Delta_s, Delta_d, n_kspace, mu, g_t, g_J, _r_Q_cur, _F67s_mf, out=_vbdg._H_stack)
                 )
             M_bdg = _vbdg.compute_observables_vectorized(M, Q, Delta_s, Delta_d, mu, tx, ty, g_J, _bdg_ev_sc, _bdg_ec_sc)
-            dF_dM_0, d2F_dM2 = self.compute_dF_dM_and_d2F(M, Q, Delta_s, Delta_d, n_kspace, mu, tx_bare, ty_bare, g_J, _F67s_mf, _q_renorm_cur, _bdg_ev_sc, _bdg_ec_sc)
+            dF_dM_0, d2F_dM2 = self.compute_dF_dM_and_d2F(M, Q, Delta_s, Delta_d, n_kspace, mu, tx_bare, ty_bare, g_J, _F67s_mf, _r_Q_cur, _bdg_ev_sc, _bdg_ec_sc)
 
             # SC+JT active: Gorkov singlet amplitude (u·v), Gutzwiller-renormalised, fed back into J_B1g off-diagonal Weiss field. Zero by symmetry when Δ=0 or Q=0.
             Delta_eff_now = abs(Delta_s) + abs(Delta_d)
@@ -2927,12 +3028,12 @@ class RMFT_Solver:
                 _g_eff = (g_Delta_s * abs(Delta_s) + g_Delta_d * abs(Delta_d)) / Delta_eff_now  
                 _F67s_mf = _g_eff * self._compute_F67_singlet(_bdg_ev_sc, _bdg_ec_sc)   # F67s receives contributions from BOTH pairing channels
                 bdg_ev_sc, bdg_ec_sc = np.linalg.eigh(
-                    _vbdg._build_H_stack(_vbdg._kpts, M, Q, Delta_s, Delta_d, n_kspace, mu, g_t, g_J, _q_renorm_cur, _F67s_mf, out=_vbdg._H_stack)
+                    _vbdg._build_H_stack(_vbdg._kpts, M, Q, Delta_s, Delta_d, n_kspace, mu, g_t, g_J, _r_Q_cur, _F67s_mf, out=_vbdg._H_stack)
                     )
                 # ── SC-state (Δ≠0) RPA determinant ──────────────
-                _chi_SS_sc, _chi_SQ_sc, _chi_QQ_sc = self.get_susceptibilities_sc(M, Q, Delta_s, Delta_d, n_kspace, mu, g_t, g_J, np.array([np.pi, np.pi]), _Gamma_M, _q_renorm_cur, (bdg_ev_sc, bdg_ec_sc), apply_diamagnetic_QQ=True)
-                _U_SQ_sc    = _r_MQ_cur * math.sqrt(max(_J_eff * _V_JT, 0.0))
-                _det_afm_sc_lin, *_ = self._rpa_det(_J_eff, _V_JT, _chi_SS_sc, _chi_SQ_sc, _chi_SQ_sc, _chi_QQ_sc, _U_SQ_sc)
+                _chi_SS_sc, _chi_SQ_sc, _chi_QQ_sc = self.get_susceptibilities_sc(M, Q, Delta_s, Delta_d, n_kspace, mu, g_t, g_J, np.array([np.pi, np.pi]), _Gamma_M, _r_Q_cur, (bdg_ev_sc, bdg_ec_sc), apply_diamagnetic_QQ=True)
+                _U_SQ_sc = _r_MQ_cur * math.sqrt(max(_J_eff * _V_JT, 0.0))
+                _det_afm_sc, *_ = self._rpa_det(_J_eff, _V_JT, _chi_SS_sc, _chi_SQ_sc, _chi_SQ_sc, _chi_QQ_sc, _U_SQ_sc)
             
             _K_eff_update_needed = (
                 iteration == 0
@@ -2940,7 +3041,7 @@ class RMFT_Solver:
                 or abs(Q - _K_eff_last_Q) > _Q_THR_REL * self.p.lambda_hop
             )
             if _K_eff_update_needed:
-                _rigidity        = self.compute_JT_rigidity_from_exchange(M, Q, Delta_s, Delta_d, n_kspace, mu, g_t, g_J, _q_renorm_cur, _F67s_mf, Q_Eg2)
+                _rigidity        = self.compute_JT_rigidity_from_exchange(M, Q, Delta_s, Delta_d, n_kspace, mu, g_t, g_J, _r_Q_cur, _F67s_mf, Q_Eg2)
                 _K_eff_scf       = max(_rigidity['K_eff'], _MATH_EPS)
                 _K_eff_Eg2_scf   = max(_rigidity['K_eff_Eg2'], _MATH_EPS)
                 _K_eff_last_M    = M
@@ -2948,17 +3049,17 @@ class RMFT_Solver:
                 _K_eff_last_iter = iteration
             
             # Gap equation: V(q) always from Δ=0 χ₀; BdG amplitudes (u,v) from SC state.
-            Delta_s_out, Delta_d_out, _v_s, _v_d, _vertex_cache, Delta_s7b_diag, Delta_d7b_diag = _vbdg.compute_gap_eq_vectorized(M, Q, Delta_s, Delta_d, n_kspace, mu, tx_bare, ty_bare, g_t, g_J, g_Delta_s, g_Delta_d, _Gamma_M, _V_JT, _V_cap, _det_afm_sc_lin, _r_MQ_cur, _q_renorm_cur, _solve_state, _bdg_ev_sc, _bdg_ec_sc, _vertex_cache)
+            Delta_s_out, Delta_d_out, Delta_s7b_diag, Delta_d7b_diag, _vertex_cache = _vbdg.compute_gap_eq_vectorized(M, Q, Delta_s, Delta_d, n_kspace, mu, tx_bare, ty_bare, g_t, g_J, g_Delta_s, g_Delta_d, _J_eff, _Gamma_M, _V_JT, _V_cap, _det_afm_sc, _r_MQ_cur, _solve_state, _bdg_ev_sc, _bdg_ec_sc, _vertex_cache)
             if force_delta_zero:
                 Delta_s_out = 0.0j
                 Delta_d_out = 0.0j
             
             # Update Q
             _bdg_ev_sc, _bdg_ec_sc = np.linalg.eigh(
-                _vbdg._build_H_stack(_vbdg._kpts, M, Q, Delta_s_out, Delta_d_out, n_kspace, mu, g_t, g_J, _q_renorm_cur, _F67s_mf, out=_vbdg._H_stack)
+                _vbdg._build_H_stack(_vbdg._kpts, M, Q, Delta_s_out, Delta_d_out, n_kspace, mu, g_t, g_J, _r_Q_cur, _F67s_mf, out=_vbdg._H_stack)
                 )
             
-            dHdQ = self._calc_dHdQ(M, Q, n_kspace, mu, g_t, g_J, _q_renorm_cur)
+            dHdQ = self._calc_dHdQ(M, Q, n_kspace, mu, g_t, g_J, _r_Q_cur)
             dHdQ_diag = np.einsum('kin,kij,kjn->kn', _bdg_ec_sc.conj(), dHdQ, _bdg_ec_sc).real
             f_k = _fermi_function(_bdg_ev_sc, self.kT)
             dHdQ_exp = np.sum(self.k_weights[:, None] * f_k * dHdQ_diag) / 4.0
@@ -3050,7 +3151,7 @@ class RMFT_Solver:
                 self._chi0_norm_cache = None # χ₀ eigenvectors keyed on Q → must rebuild
                 _Lambda_inst = max(_Lambda_inst, 2.0)
             
-            mu_new, n_kspace = self._find_mu_for_density(M_mixed, Q_mixed, Delta_s_mixed, Delta_d_mixed, target_doping, mu, _t_eff_now, g_t, g_J, _q_renorm_cur, _F67s_mf)
+            mu_new, n_kspace = self._find_mu_for_density(M_mixed, Q_mixed, Delta_s_mixed, Delta_d_mixed, target_doping, mu, _t_eff_now, g_t, g_J, _r_Q_cur, _F67s_mf)
             
             # max_diff tracks order-parameter convergence (M, Q, Δ_s, Δ_d).
             max_diff = max(
@@ -3140,10 +3241,10 @@ class RMFT_Solver:
                         _scf_log("SCF", f"↺ α-recovery after freeze → {_alpha:.5f}")
             _max_diff_prev = max_diff            
                 
-            if _det_afm_sc_lin < 0.0:
+            if _det_afm_sc < 0.0:
                 _ansatz_unstable_ever = True   # physical instability: collinear AFM+SC ansatz broke down
                 # Past QCP: exponential α penalty ∝ |det_afm|/det_warn; Λ_inst boosted to keep Anderson conservative.
-                _det_penalty = float(np.clip(abs(_det_afm_sc_lin) / max(_RPA_DET_WARN, 1e-6), 0.0, 5.0))
+                _det_penalty = float(np.clip(abs(_det_afm_sc) / max(_RPA_DET_WARN, 1e-6), 0.0, 5.0))
                 _alpha = float(np.clip(_alpha * math.exp(-_RPA_QCP_PENALTY * _det_penalty),
                                        _MIXING / 16.0, _alpha))
                 _Lambda_inst = float(np.clip(_Lambda_inst + 1.5 * _det_penalty, 0.0, 10.0))
@@ -3151,7 +3252,7 @@ class RMFT_Solver:
                 if _alpha <= _MIXING / 16.0 * 1.1:
                     _alpha_freeze_count += 1
             # Near QCP: belt-and-suspenders α cap
-            elif (_det_afm_sc_lin < _RPA_DET_WARN) or (abs(_V_d_now) > _V_CUT):
+            elif (_det_afm_sc < _RPA_DET_WARN) or (abs(_V_d_now) > _V_CUT):
                 _alpha = min(_alpha, _MIXING / (1.0 + _Lambda_inst))
             else:
                 # Safe zone (det > 0): fast exponential forgetting of past instability
@@ -3173,12 +3274,12 @@ class RMFT_Solver:
             if _vertex_cache is not None:
                 _det_afm = _vertex_cache['det_afm']
                 _det_q0  = _vertex_cache['det_q0']
-                _vertex_cache['det_afm_current'] = _det_afm_sc_lin
+                _vertex_cache['det_afm_current'] = _det_afm_sc
 
             if verbose:
-                if _det_afm_sc_lin < 0.0:
+                if _det_afm_sc < 0.0:
                     _regime = "[>AFM-QCP]"
-                elif (0.0 < _det_afm_sc_lin < _RPA_DET_WARN) :
+                elif (0.0 < _det_afm_sc < _RPA_DET_WARN) :
                     _regime = "[~AFM-QCP]"
                 elif (0.0 < _det_q0  < _RPA_DET_WARN) or (abs(_V_s_now) > _V_CUT):
                     _regime = "[~FM-QCP]"
@@ -3191,25 +3292,23 @@ class RMFT_Solver:
                         _vmat_flags += " ⚠low-var"
                     if _vertex_cache.get('vmat_same_sign', False):
                         _vmat_flags += " ⚠same-sign"
-
-                # q-resolved vertex flags: appended only when V_d < 0 to keep normal output compact.
-                # V_afm < 0: globally repulsive spin channel (unphysical, cross-term dominates).
-                if _vertex_cache is not None:
+                    # q-resolved vertex flags: appended only when V_d < 0 to keep normal output compact; V_afm < 0: globally repulsive spin channel (unphysical, cross-term dominates).
                     _v_afm = _vertex_cache.get('V_afm_mean', float('nan'))
                     _v_fwd = _vertex_cache.get('V_fwd_mean', float('nan'))
                     _v_neg = _vertex_cache.get('V_neg_frac', float('nan'))
                     _vmat_flags += (f" [V_afm={_v_afm:.3f} V_fwd={_v_fwd:.3f} neg={_v_neg:.2f}]")
                 
-                _scf_log("SCF", f"δ={target_doping:.2f} {iteration+1:3d}/{_MAX_ITER}"
+                _scf_log("SCF-I", f"δ={target_doping:.2f} {iteration+1:3d}/{_MAX_ITER}"
                         f"  conv={max_diff:.1e}  M={M:.3f}  Q={Q:+.4f}"
                         f"  |Δ|={(abs(Delta_s)+abs(Delta_d)):.4f}"
                         f"  J_eff={_J_eff:.4f} eV  mu={mu_new:.5f}  g_t={g_t:.4f}  g_J={g_J:.4f}"
-                        f"  dFM={_det_q0:.3f}  dAFM={_det_afm:.3f}  dAFM_sc={_det_afm_sc_lin:.3f}  χ_SQ_sc={_chi_SQ_sc:.4f}"
-                        f"  V_s={_V_s_now:.3f} V_d={_V_d_now:.3f}{_vmat_flags}"
+                        f"  dFM={_det_q0:.3f}  dAFM={_det_afm:.3f}  dAFM_sc={_det_afm_sc:.3f}  χ_SQ_sc={_chi_SQ_sc:.5f}"
                         f"  Γ_M={_Gamma_M*1000:.2f}meV  α={_alpha:.4f}"
-                        f"  δB1g={self.B1g_expectation(tx_bare, ty_bare, (_bdg_ev_sc, _bdg_ec_sc)) - self.B1g_expectation(tx_bare, ty_bare, self._get_chi0_norm_cache(M, 0.0, n_kspace, mu, g_t, g_J, _vbdg)):+.4f}  F67s={_F67s_mf:+.4f}"
                         f"  [{_regime}]  {_iter_s:3.0f}s/it")
-
+                _scf_log("SCF-II", f"Δs7b={Delta_s7b_diag.real:+.4f}  Δd7b={Delta_d7b_diag.real:+.4f}"
+                        f"  δB1g={self.B1g_expectation(tx_bare, ty_bare, (_bdg_ev_sc, _bdg_ec_sc)) - self.B1g_expectation(tx_bare, ty_bare, self._get_chi0_norm_cache(M, 0.0, n_kspace, mu, g_t, g_J, _vbdg)):+.4f}  F67s={_F67s_mf:+.4f}"
+                        f"  V_s={_V_s_now:.3f}  V_d={_V_d_now:.3f}{_vmat_flags}"
+                        f"  Q_fluct={F_cluster['Q_fluct']:.4f}")
             # Save the Anderson-mixed values for post-kick convergence check.
             _M_pre_kick  = M_mixed
             _Q_pre_kick  = Q_mixed
@@ -3221,14 +3320,7 @@ class RMFT_Solver:
             # Saddle-escape: |Δ|≈0 + negative Hessian eigenvalue → kick along λ_min eigenvector.
             Delta_total = abs(Delta_s) + abs(Delta_d)
             if Delta_total < 5.0 * self.p.tol and iteration > 3 and iteration % 8 == 0:
-                if _vertex_cache is not None:
-                    V_s = _vertex_cache['V_s_scalar']
-                    V_d = _vertex_cache['V_d_scalar']
-                else:
-                    V_s = _V_JT
-                    V_d = V_s
-
-                _hk = self.compute_hessian(M, Q, Delta_s, Delta_d, n_kspace, mu, g_t, g_J, g_Delta_s, g_Delta_d, _q_renorm_cur, _F67s_mf, V_s, V_d, max(self._K_bare, 1e-9), Q_Eg2, _K_eff_Eg2_scf)
+                _hk = self.compute_hessian(M, Q, Delta_s, Delta_d, n_kspace, mu, g_t, g_J, g_Delta_s, g_Delta_d, _r_Q_cur, _F67s_mf, max(self._K_bare, 1e-9), Q_Eg2, _K_eff_Eg2_scf, _V_JT, _vertex_cache)
                 
                 _lmin_k = float(_hk['eigenvalues'][0])
                 if np.isfinite(_lmin_k) and _lmin_k < 0:
@@ -3253,8 +3345,7 @@ class RMFT_Solver:
                     _kick_mag  = min(2.0 * self.kT, 0.1 * Delta_total) * _kick_damp * _curvature
 
                     # M: gentle pull toward Stoner estimate when SC mode and M overshoots.
-                    _stoner_for_kick = float(_J_eff * max(_vertex_cache.get('chi_SS_afm', 0.0), 0.0)) if _vertex_cache is not None else 0.0
-                    _M_phys_est = self.p.estimate_M0(target_doping, _stoner_for_kick)
+                    _M_phys_est = self.p.estimate_M0(target_doping, float(_J_eff * max(_vertex_cache['chi_SS_afm'], 0.0)) if _vertex_cache is not None else None)
                     _m_was_pulled = False
                     if _mode in ('pure-SC', 'SC-triggered-JT') and M > 3.0 * _M_phys_est:
                         _pull_frac = _MODE_PULL_FRAC * _kick_damp
@@ -3298,7 +3389,7 @@ class RMFT_Solver:
             _too_early = (iteration < _MIN_ITER)
             if (not _kick_fired
                     and not _too_early
-                    and not _det_afm_sc_lin < 0.0
+                    and not _det_afm_sc < 0.0
                     and max_diff < self.p.tol
                     and abs(n_kspace - (1 - target_doping)) < self.p.tol * 10):
                 converged = True
@@ -3314,27 +3405,21 @@ class RMFT_Solver:
                 f"{'  [ansatz unstable]' if _ansatz_unstable_ever else ''}")
 
         # Post-loop diagnostic: λ_max and Rayleigh JT projection and store converged gap and distortion
-        J_A1g_diag, _ = self.p.exchange_channels(Q, n_kspace, tx_bare, ty_bare, g_J, _q_renorm_cur)
+        J_A1g_diag, _ = self.p.exchange_channels(Q, n_kspace, tx_bare, ty_bare, g_J, _r_Q_cur)
         _J_eff = self.p.Z * J_A1g_diag[0]
-        _lin: Dict = self.solve_linearized_gap_equation(M, Q, n_kspace, mu, g_t, g_J, g_Delta_s, g_Delta_d, _J_eff, _Gamma_M, _V_JT, _V_cap)
-        _gap_diag = self.scf_gap_diagnostics(_lin, Delta_s, Delta_d, g_Delta_s, g_Delta_d)
-        self._last_Delta_s = Delta_s
-        self._last_Delta_d = Delta_d
-        self._last_Q       = Q
+        if _vertex_cache is None:
+            _vertex_cache = self.compute_pairing_kernel_and_build_cache(M, Q, n_kspace, mu, g_t, g_J, g_Delta_s, g_Delta_d, _J_eff, _Gamma_M, _V_JT, _V_cap, _det_afm_sc, _solve_state)
+        _vertex_cache = self.scf_gap_diagnostics(Delta_s, Delta_d, g_Delta_s, g_Delta_d, _vertex_cache)
         
         if converged:
-            hessian_result = self.compute_hessian(
-                M, Q, Delta_s, Delta_d, n_kspace, mu, g_t, g_J, g_Delta_s, g_Delta_d, _q_renorm_cur, _F67s_mf,
-                _vertex_cache['V_s_scalar'] if _vertex_cache is not None else 0.0,
-                _vertex_cache['V_d_scalar'] if _vertex_cache is not None else 0.0,
-                _K_eff_scf, Q_Eg2, _K_eff_Eg2_scf)
+            hessian_result = self.compute_hessian(M, Q, Delta_s, Delta_d, n_kspace, mu, g_t, g_J, g_Delta_s, g_Delta_d, _r_Q_cur, _F67s_mf, _K_eff_scf, Q_Eg2, _K_eff_Eg2_scf, _V_JT, _vertex_cache)
         else:
             hessian_result = {'Delta_s_frac': 0.0, 'F_bdg': 0.0, 'eigenvectors': None, 'eigenvalues': None}
 
-        _chi_tau_result = self._compute_chi_tau(M, Q, Delta_s, Delta_d, n_kspace, mu, g_t, g_J, _q_renorm_cur, _F67s_mf)
+        _chi_tau_result = self._compute_chi_tau(M, Q, Delta_s, Delta_d, n_kspace, mu, g_t, g_J, _r_Q_cur, _F67s_mf)
 
         # ── Normal-state K_eff reference (Δ=0) for gap-induced lattice-effect diagnostics
-        _rigidity_sc = self.compute_JT_rigidity_from_exchange(M, Q, Delta_s, Delta_d, n_kspace, mu, g_t, g_J, _q_renorm_cur, _F67s_mf, Q_Eg2)
+        _rigidity_sc = self.compute_JT_rigidity_from_exchange(M, Q, Delta_s, Delta_d, n_kspace, mu, g_t, g_J, _r_Q_cur, _F67s_mf, Q_Eg2)
         _rigidity_n  = self.compute_JT_rigidity_from_exchange(M, 0.0, 0.0j, 0.0j, n_kspace, mu, g_t, g_J)
         
         _lambda_JT_sc = self.p.g_JT**2 * max(-float(_chi_tau_result['chi_tau_net']), 0.0) / max(_rigidity_sc['K_eff'], _MATH_EPS)
@@ -3352,19 +3437,19 @@ class RMFT_Solver:
         if converged and (_Delta_s_mag + _Delta_d_mag) > _QQ_DELTA_THRESH:
             # Adaptive finite-difference step: 5 % of |Q| protects against noise at larger distortions.
             _dQ_step = max(_DQ_FS_VERTEX, _DQ_FS_VERTEX_FRAC * abs(Q))
-            lmax_p, V_diag_p = self._vertex_matrix_at_Q(M, Q + _dQ_step, n_kspace, mu, g_t, g_J, g_Delta_s, g_Delta_d, _Gamma_M, _V_JT, _V_cap, _vertex_cache)
-            lmax_m, V_diag_m = self._vertex_matrix_at_Q(M, Q - _dQ_step, n_kspace, mu, g_t, g_J, g_Delta_s, g_Delta_d, _Gamma_M, _V_JT, _V_cap, _vertex_cache)
+            lmax_p, V_diag_p = self._vertex_matrix_at_Q(M, Q + _dQ_step, n_kspace, mu, g_t, g_J, g_Delta_s, g_Delta_d, _Gamma_M, _V_JT, _V_cap, _det_afm_sc, _solve_state)
+            lmax_m, V_diag_m = self._vertex_matrix_at_Q(M, Q - _dQ_step, n_kspace, mu, g_t, g_J, g_Delta_s, g_Delta_d, _Gamma_M, _V_JT, _V_cap, _det_afm_sc, _solve_state)
             _dlam_dQ_fs = (lmax_p - lmax_m) / (2.0 * _dQ_step)
             _dV_dQ_diag = (V_diag_p - V_diag_m) / (2.0 * _dQ_step)
             _hot_spot_frac = float(np.mean(_dV_dQ_diag > 0)) if len(_dV_dQ_diag) > 0 else 0.0
 
             # Channel-resolved pairing strength from the 2×2 (s,d) kernel projection — handles s-d mixing exactly via K12, unlike a single-eigenvector scalar split.
-            _lam_max_s = _gap_diag['lambda_s']
-            _lam_max_d = _gap_diag['lambda_d']
+            _lam_max_s = _vertex_cache['lambda_s']
+            _lam_max_d = _vertex_cache['lambda_d']
             # Eigenvector vs SCF amplitude mismatch: linearised gap eq says d-wave dominates but SCF converged to s-wave (Δ_s >> Δ_d);
             # this indicates that the non-linear fixpoint (large Δ) has quenched the d-wave channel via spectrum depletion.
             _sym_scf      = 'd' if _Delta_d_mag / (_Delta_s_mag + _Delta_d_mag) > 0.5 else 's'
-            _sym_lin      = 'd' if abs(_gap_diag['v_d']) > abs(_gap_diag['v_s']) else 's'
+            _sym_lin      = 'd' if abs(_vertex_cache['K_pair_v_d']) > abs(_vertex_cache['K_pair_v_s']) else 's'
             _sym_mismatch = _sym_scf != _sym_lin
 
             if verbose:
@@ -3376,7 +3461,7 @@ class RMFT_Solver:
                     f"  {'[concentrated]' if _hot_spot_frac > 0.6 else '[diffuse]' if _hot_spot_frac > 0.3 else '[anti-nodal suppressed]'}")
                 _scf_log("SCF-RES",
                     f"δ={target_doping:.4f}"
-                    f"  λ_lin_max={_gap_diag['lambda_lin_max']:.3f} (K12={_gap_diag['K_pair'][0,1]:+.4f})"
+                    f"  λ_lin_max={_vertex_cache['lambda_lin_max']:.3f} (K12={_vertex_cache['K_pair'][0,1]:+.4f})"
                     f"  λ_s={_lam_max_s:.4f}  λ_d={_lam_max_d:.4f}"
                     f"  |Δs|={_Delta_s_mag*1000:.3f}meV  |Δd|={_Delta_d_mag*1000:.3f}meV"
                     f"  SCF={_sym_scf}  lin={_sym_lin}"
@@ -3466,7 +3551,7 @@ class RMFT_Solver:
             _scf_log("SCF-RES",
                 f"δ={target_doping:.4f} ✓ conv {iteration+1} iters"
                 f"  M={M:.4f}  Q={Q:+.4f}  |Δs|={_Delta_s_mag:.4f}  |Δd|={_Delta_d_mag:.4f}"
-                f"  n={n_kspace:.4f}  μ={mu:.4f}  det_AFM_sc={_det_afm_sc_lin:.4f}"
+                f"  n={n_kspace:.4f}  μ={mu:.4f}  det_AFM_sc={_det_afm_sc:.4f}"
                 f"  F_bdg={hessian_result['F_bdg']:.4f}  F_cluster={F_cluster['F_per_site']:.4f}"
                 f"  JT={'✓' if selection_ratio > _JT_ACT_THR else '✗'}  {_hstr}"
                 f"  dyn={_scf_dynamics_regime}"
@@ -3480,19 +3565,19 @@ class RMFT_Solver:
 
         # ── Post-SCF Mott filter ──────────────────────────────────────────────
         # g_t<0.10 (δ<0.053): incoherent ZRS band; ξ/a<1.0: BEC limit, Cooper pairs not lattice-coherent.
-        _mott_suspect = (g_t < _G_T_COHERENCE_MIN) or (_gap_diag['xi_over_a'] < 1.0)
+        _mott_suspect = (g_t < _G_T_COHERENCE_MIN) or (_vertex_cache['xi_nodal'] < 1.0)
         if _mott_suspect:
             Delta_s   = 0.0 + 0.0j
             Delta_d   = 0.0 + 0.0j
             converged = False
             if verbose:
-                _reason = 'g_t<min (Mott)' if g_t < _G_T_COHERENCE_MIN else f"ξ/a={_gap_diag['xi_over_a']:.2f}<1 (BEC)"
-                _scf_log("SCF-RES", f"δ={target_doping:.4f} ⚠ MOTT-SUSPECT [{_reason}]  g_t={g_t:.3f}  ξ/a={_gap_diag['xi_over_a']:.2f}  — gap suppressed")
+                _reason = 'g_t<min (Mott)' if g_t < _G_T_COHERENCE_MIN else f"ξ/a={_vertex_cache['xi_nodal']:.2f}<1 (BEC)"
+                _scf_log("SCF-RES", f"δ={target_doping:.4f} ⚠ MOTT-SUSPECT [{_reason}]  g_t={g_t:.3f}  ξ/a={_vertex_cache['xi_nodal']:.2f}  — gap suppressed")
         
         # ── Post-convergence Eg,2 PHONON STABILITY diagnostic
-        _chi_QQ_mat_final = self._chi_QQ_matrix_elements(M, Q, Delta_s, Delta_d, n_kspace, mu, g_t, g_J, _q_renorm_cur, _F67s_mf, Q_Eg2, return_matrix=True)
+        _chi_QQ_mat_final = self._chi_QQ_matrix_elements(M, Q, Delta_s, Delta_d, n_kspace, mu, g_t, g_J, _r_Q_cur, _F67s_mf, Q_Eg2, return_matrix=True)
         _chi_Eg2Eg2_final = float(_chi_QQ_mat_final[1, 1])
-        _rigidity_final   = self.compute_JT_rigidity_from_exchange(M, Q, Delta_s, Delta_d, n_kspace, mu, g_t, g_J, _q_renorm_cur, _F67s_mf, Q_Eg2)
+        _rigidity_final   = self.compute_JT_rigidity_from_exchange(M, Q, Delta_s, Delta_d, n_kspace, mu, g_t, g_J, _r_Q_cur, _F67s_mf, Q_Eg2)
         _K_eff_Eg2_final  = float(_rigidity_final['K_eff_Eg2'])
         _G44_final        = 1.0 - _chi_Eg2Eg2_final * self.p.g_Eg2**2 / max(_K_eff_Eg2_final, _MATH_EPS)
         _eg2_exp_final    = self.Eg2_expectation((_bdg_ev_sc, _bdg_ec_sc))
@@ -3501,7 +3586,7 @@ class RMFT_Solver:
                                  f"χ_Eg2,Eg2={_chi_Eg2Eg2_final:+.4f}  K_eff_Eg2={_K_eff_Eg2_final:+.4f}  "
                                  f"G44={_G44_final:+.4f} [{'stable' if _G44_final > 0 else 'SOFT Eg2 PHONON'}]")
 
-        result = dict(_gap_diag)
+        result = dict(_vertex_cache)
         result.update({
             'M': M,
             'Q': Q,
@@ -3511,7 +3596,7 @@ class RMFT_Solver:
             'G44_Eg2_stable': bool(_G44_final > 0) if math.isfinite(_G44_final) else None,
             'Delta_s': _Delta_s_mag,
             'Delta_d': _Delta_d_mag,
-            'Delta_s7b_diag': Delta_s7b_diag,   # diagnostic-only, NOT self-consistently iterated -- see compute_gap_eq_vectorized
+            'Delta_s7b_diag': Delta_s7b_diag,   # diagnostic-only, NOT self-consistently iterated
             'Delta_d7b_diag': Delta_d7b_diag,
             'chi_tau_sc': _chi_tau_result['chi_tau_sc'],
             'chi_tau_n': _chi_tau_result['chi_tau_n'],
@@ -3526,7 +3611,7 @@ class RMFT_Solver:
             'tx': tx,
             'ty': ty,
             'J_eff': _J_eff,
-            'r_Q': _q_renorm_cur,
+            'r_Q': _r_Q_cur,
             'r_MQ': _r_MQ_cur,
             'F67s_mf': _F67s_mf,
             'target_doping': target_doping,
@@ -3588,7 +3673,7 @@ class RMFT_Solver:
                 _shift_q = self.shift_table[_nxq, _nyq]
                 _Ekq_ic = _Ek_ic[_shift_q]
                 _Vkq_ic = _Vk_ic[_shift_q]
-                _w_ic   = self.k_weights_mbz
+                _w_ic   = self.k_weights
             else:
                 _kpts_q = (self.k_points + _q_ic[None,:] + np.pi) % (2*np.pi) - np.pi
                 _Ekq_ic, _Vkq_ic = np.linalg.eigh(
@@ -3699,10 +3784,10 @@ class RMFT_Solver:
             return x_simple
         return x_new
 
-    def compute_dF_dM_and_d2F(self, M: float, Q: float, Delta_s: complex, Delta_d: complex, n_kspace: float, mu: float, tx_bare: float, ty_bare: float, g_J: float, F67s_mf: float, q_renorm: float, ev: np.ndarray, ec: np.ndarray) -> Tuple[float, float]:
+    def compute_dF_dM_and_d2F(self, M: float, Q: float, Delta_s: complex, Delta_d: complex, n_kspace: float, mu: float, tx_bare: float, ty_bare: float, g_J: float, F67s_mf: float, r_Q: float, ev: np.ndarray, ec: np.ndarray) -> Tuple[float, float]:
         
         # ∂H/∂M: only J_A1g (diagonal) contributes; J_B1g (τ_x, off-diagonal) has no diagonal entry, but its Weiss field (F67s_mf) must be included in the full H so eigenvectors ec carry the correct inter-band matrix elements for the Kubo term2.
-        J_A1g_diag, _ = self.p.exchange_channels(Q, n_kspace, tx_bare, ty_bare, g_J, q_renorm)
+        J_A1g_diag, _ = self.p.exchange_channels(Q, n_kspace, tx_bare, ty_bare, g_J, r_Q)
         h_J_unit = self.p.Z * J_A1g_diag * self.sz_op / 2.0   # element-wise: diagonal ∂H/∂M
         
         dH_diag = np.concatenate([
@@ -3733,7 +3818,7 @@ class RMFT_Solver:
         d2F = (term1 - term2) / 4.0 + 0.5 * J_eff
         return grad, d2F
 
-    def compute_hessian(self, M: float, Q: float, Delta_s: complex, Delta_d: complex, n_kspace: float, mu: float, g_t: float, g_J: float, g_s: float, g_d: float, q_renorm: float, F67s_mf: float, V_s: float, V_d: float, K_eff_for_free_energy: float, Q_Eg2: float, K_eff_Eg2_for_free_energy: float) -> Dict:
+    def compute_hessian(self, M: float, Q: float, Delta_s: complex, Delta_d: complex, n_kspace: float, mu: float, g_t: float, g_J: float, g_s: float, g_d: float, r_Q: float, F67s_mf: float, K_eff_for_free_energy: float, Q_Eg2: float, K_eff_Eg2_for_free_energy: float, V_JT: float, vertex_cache: dict = None) -> Dict:
         """ 3×3 finite-difference Hessian of F(M,Q,Δ), evaluated with Q_Eg2 HELD FIXED at its current (input) value
         (Q_Eg2 is not one of the three probed directions here -- it enters only as a fixed background parameter, so
         F() is evaluated at the correct total state rather than silently at Q_Eg2=0).
@@ -3745,6 +3830,13 @@ class RMFT_Solver:
         stationary point whenever the converged state carries a nontrivial relative phase.
         """
         vbdg = self._get_vbdg()
+        if vertex_cache is not None:
+            V_s = vertex_cache['V_s_scalar']
+            V_d = vertex_cache['V_d_scalar']
+        else:
+            V_s = V_JT
+            V_d = V_s
+        
         Delta = abs(Delta_s) + abs(Delta_d)
         Delta_s_frac = (abs(Delta_s) / Delta) if Delta > _QQ_DELTA_THRESH else 0.5
         Delta_d_frac = 1.0 - Delta_s_frac
@@ -3758,7 +3850,7 @@ class RMFT_Solver:
         eps_D = min(max(1e-5, abs(Delta) * 1e-3), max(abs(Delta) / 2.0, 1e-10))
         
         _tx_bare_h, _ty_bare_h = self.p.effective_hopping_anisotropic(Q)
-        _J_A1g_diag_h, _ = self.p.exchange_channels(Q, n_kspace, _tx_bare_h, _ty_bare_h, g_J, q_renorm)
+        _J_A1g_diag_h, _ = self.p.exchange_channels(Q, n_kspace, _tx_bare_h, _ty_bare_h, g_J, r_Q)
         J_eff = self.p.Z * _J_A1g_diag_h[0]
 
         def F(m_val, q_val, delta_val):
@@ -3766,7 +3858,7 @@ class RMFT_Solver:
             ds = phase_s * abs(delta_val) * Delta_s_frac
             dd = phase_d * abs(delta_val) * Delta_d_frac
             ev_all, _ = np.linalg.eigh(
-                vbdg._build_H_stack(vbdg._kpts, m_val, q_val, ds, dd, n_kspace, mu, g_t, g_J, q_renorm, F67s_mf, out=vbdg._H_stack, Q_Eg2=Q_Eg2)
+                vbdg._build_H_stack(vbdg._kpts, m_val, q_val, ds, dd, n_kspace, mu, g_t, g_J, r_Q, F67s_mf, out=vbdg._H_stack, Q_Eg2=Q_Eg2)
                 )
             return self.compute_bdg_free_energy(m_val, q_val, ds, dd, J_eff, g_s, g_d, V_s, V_d, K_eff_for_free_energy, ev_all, Q_Eg2=Q_Eg2, K_eff_Eg2_for_free_energy=K_eff_Eg2_for_free_energy)
 
@@ -4199,7 +4291,7 @@ class RMFT_Solver:
         Linearised gap eigenvalue λ_max(T) across a temperature range.
 
         Each point: (1) normal-state SCF at temperature T with Δ≡0, so M(T) and Q(T) relax self-consistently
-        without a condensate biasing the bands; (2) solve_linearized_gap_equation on that normal-state background.
+        without a condensate biasing the bands; (2) compute_pairing_kernel_and_build_cache on that normal-state background.
         This avoids the T=0 AFM Weiss field artefact (artificially split bands → λ never reaches 1) from the
         previous implementation that passed the converged SC gaps into the linearised kernel.
 
@@ -4404,7 +4496,7 @@ class RMFT_Solver:
             V_eff = V_dom
         lambda_eff = N_eff * V_eff
 
-        lambda_lin_max_Q0 = float(self.solve_linearized_gap_equation(M, 0.0, n_kspace, mu, g_t, g_J, g_Delta_s, g_Delta_d, J_eff, _Gamma_M, _V_JT, _V_cap)['lambda_lin_max'])
+        lambda_lin_max_Q0 = float(self.compute_pairing_kernel_and_build_cache(M, 0.0, n_kspace, mu, g_t, g_J, g_Delta_s, g_Delta_d, J_eff, _Gamma_M, _V_JT, _V_cap)['lambda_lin_max'])
 
         H_afm_mat = self.build_local_hamiltonian_for_bdg(1.0, M, J_A1g_diag, mu)
         comm = self.B1g_op @ H_afm_mat - H_afm_mat @ self.B1g_op
@@ -4454,39 +4546,6 @@ class RMFT_Solver:
             'K_eff':            K_eff_n,
             }
         return result
-    
-    @staticmethod
-    def _unique_q_pairs(fs_pts: np.ndarray) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
-        """
-        Numerical strategy:
-            1. Fold q into (−π, π] interval.
-            2. Convert to integer representation with scale factor.
-            3. Perform q ↔ −q canonicalisation on integers (robust against 1e-15 noise).
-            4. Deduplicated q = k_i − k_j for all upper-triangle FS pairs (including i=j).
-            5. Convert back to float.
-
-        Returns
-        -------
-        i_idx, j_idx : upper-triangle pair indices  (n_pairs,)
-        unique_q     : canonical q-vectors in (−π, π]²  (n_unique, 2)
-        inv_idx      : pair → unique_q row mapping  (n_pairs,)
-        """
-        i_idx, j_idx = np.triu_indices(len(fs_pts))
-        q_raw = fs_pts[i_idx] - fs_pts[j_idx]
-        q_arr = (q_raw + np.pi) % (2.0 * np.pi) - np.pi
-        q_int_raw = np.rint(q_arr * _Q_UNIQUE_SCALE).astype(np.int64)
-        neg_int = -q_int_raw
-        neg_int = (-q_int_raw + _PI_INT) % (2 * _PI_INT) - _PI_INT
-        qx = q_int_raw[:, 0]
-        qy = q_int_raw[:, 1]
-        nx = neg_int[:, 0]
-        ny = neg_int[:, 1]
-        prefer_neg = (nx < qx) | ((nx == qx) & (ny < qy))
-        q_int = np.where(prefer_neg[:, None], neg_int, q_int_raw)
-        u_int, inv_idx = np.unique(q_int, axis=0, return_inverse=True)
-        unique_q = u_int.astype(np.float64) / _Q_UNIQUE_SCALE
-        unique_q = (unique_q + np.pi) % (2.0 * np.pi) - np.pi
-        return i_idx, j_idx, unique_q, inv_idx
 
     def _get_fs_points(self, M: float, Q: float, n_kspace: float, mu: float, g_t: float, g_J: float, store_cache: bool = True, compute_vF: bool = False, prefer_dwave: bool = True):
         """
@@ -4533,9 +4592,12 @@ class RMFT_Solver:
         ev_pos = np.where(ev_all > 0, ev_all, np.inf)
         Emin   = ev_pos.min(axis=1)
 
-        # ── Step 2: MBZ deduplication ────────────────────────────────────────────
-        # For collinear AFM with Q_AFM=(π,π), k and k+Q_AFM are the same physical state.
-        # Keeping both corrupts K_dd because φ_d(k+Q) = -φ_d(k) → negative cross-term.
+        # ── Step 2: Thermal weight ──────────────────────────────────────────────
+        _f_all = _fermi_function(Emin, self.kT)
+        _therm = _f_all * (1.0 - _f_all) / self.kT
+        near_fs = _therm > _FS_WEIGHT_THR * 0.25 / self.kT
+
+        # ── Step 3: Conditional MBZ deduplication ────────────────────────────────
         _half_NK = _NK // 2
         _kx_all = self.k_points[:, 0]
         _ky_all = self.k_points[:, 1]
@@ -4543,16 +4605,21 @@ class RMFT_Solver:
         _iy_all = (np.round((_ky_all + np.pi) * (_NK / (2.0 * np.pi)))).astype(int) % _NK
         _code_all    = (_ix_all * _NK + _iy_all).astype(np.int32)
         _partner_all = ((_ix_all + _half_NK) % _NK * _NK + (_iy_all + _half_NK) % _NK).astype(np.int32)
-        mbz_mask_k = _code_all < _partner_all        # True for canonical MBZ rep
 
-        # Thermal weight for FS proximity
-        _f_all = _fermi_function(Emin, self.kT)
-        _therm = _f_all * (1.0 - _f_all) / self.kT
-        near_fs = _therm > _FS_WEIGHT_THR * 0.25 / self.kT  # maximum of f(1-f)/kT at E=0
-        near_fs_mbz = near_fs & mbz_mask_k
-        fs_idx_all = np.where(near_fs_mbz)[0]
+        canonical_choice = _code_all < _partner_all
 
-        # Fallback: if MBZ window empty (rare), use full BZ
+        if abs(self.p.g_JT * Q) < 1e-8:
+            # JT coupling negligible → k and k+Q_AFM are degenerate
+            is_degenerate = np.ones(len(_kx_all), dtype=bool)
+        else:
+            tx_b, ty_b = self.p.effective_hopping_anisotropic(Q)
+            beta_k_all = self.p.wave_function_weight(tx_b, ty_b, _kx_all, _ky_all)
+            beta_k_partner = beta_k_all[_partner_all]  # uses the index trick
+            is_degenerate = np.abs(beta_k_all - beta_k_partner) < 1e-8
+
+        fs_mask = near_fs & (canonical_choice | ~is_degenerate)
+        fs_idx_all = np.where(fs_mask)[0]
+
         if len(fs_idx_all) == 0:
             fs_idx_all = np.where(near_fs)[0]
             if len(fs_idx_all) == 0:
@@ -4572,7 +4639,7 @@ class RMFT_Solver:
         else:
             form_weight = np.ones(len(kxy_all))
 
-        # ── Step 3: |v_F| at Δ=0 on MBZ-filtered subset ─────────────────────────
+        # ── Step 4: |v_F| on the filtered subset ──────────────────────────────────
         if compute_vF:
             dk = min(1e-2, max(1e-4, 2.0 * np.pi / _NK / 6.0))
             kx, ky = kxy_all[:, 0], kxy_all[:, 1]
@@ -4648,7 +4715,7 @@ class VectorizedBdG:
         self.Z        = solver.p.Z
         self.g_Eg2    = solver.p.g_Eg2
     
-    def _build_H_stack(self, kpts: np.ndarray, M: float, Q: float, Delta_s: complex, Delta_d: complex, n_kspace: float, mu: float, g_t: float, g_J: float, q_renorm: float = 0.0, F67s_mf: float = 0.0, out: Optional[np.ndarray] = None, Q_Eg2: float = 0.0, Delta_s7b: complex = 0.0j, Delta_d7b: complex = 0.0j) -> np.ndarray:
+    def _build_H_stack(self, kpts: np.ndarray, M: float, Q: float, Delta_s: complex, Delta_d: complex, n_kspace: float, mu: float, g_t: float, g_J: float, r_Q: float = 0.0, F67s_mf: float = 0.0, out: Optional[np.ndarray] = None, Q_Eg2: float = 0.0, Delta_s7b: complex = 0.0j, Delta_d7b: complex = 0.0j) -> np.ndarray:
         """
         Build the (N, 24, 24) BdG Hamiltonian stack for an arbitrary kpts array.
         24×24 Nambu basis: [Part_A(0:6), Part_B(6:12), Hole_A(12:18), Hole_B(18:24)], each sub-block in the
@@ -4679,7 +4746,7 @@ class VectorizedBdG:
         
         tx_b, ty_b = self.solver.p.effective_hopping_anisotropic(Q)
         Tx_op, Ty_op = self.solver.p.hopping_matrices(Q)
-        J_A1g_diag, J_B1g_bare = self.solver.p.exchange_channels(Q, n_kspace, tx_b, ty_b, g_J, q_renorm)
+        J_A1g_diag, J_B1g_bare = self.solver.p.exchange_channels(Q, n_kspace, tx_b, ty_b, g_J, r_Q)
 
         # --- Local Hamiltonians (A/B sublattice), full 6×6 (Γ6⊕Γ7a⊕Γ7b) ---
         H_A = self.solver.build_local_hamiltonian_for_bdg(+1.0, M, J_A1g_diag, mu)
@@ -4792,35 +4859,59 @@ class VectorizedBdG:
         M_stag = float(np.dot(solver.k_weights, mag_A - mag_B)) / 4.0
         return M_stag
 
-    def compute_gap_eq_vectorized(self, M: float, Q: float, Delta_s: complex, Delta_d: complex, n_kspace: float, mu: float, tx_bare: float, ty_bare: float, g_t: float, g_J: float, g_Delta_s: float, g_Delta_d: float, Gamma_M: float, V_JT: float, V_cap: float, det_afm_sc: float, q_renorm: float, r_MQ: float, _solve_state: '_SolveState', ev: np.ndarray, ec: np.ndarray, _vertex_cache: dict = None) -> Tuple[complex, complex, float, float, dict, complex, complex]:
+    def compute_gap_eq_vectorized(self, M: float, Q: float, Delta_s: complex, Delta_d: complex, n_kspace: float, mu: float, tx_bare: float, ty_bare: float, g_t: float, g_J: float, g_Delta_s: float, g_Delta_d: float, J_eff: float, Gamma_M: float, V_JT: float, V_cap: float, det_afm_sc: float, r_MQ: float, solve_state: '_SolveState', ev: np.ndarray, ec: np.ndarray, vertex_cache: dict = None) -> Tuple[complex, complex, complex, complex, dict]:
         """
         Gap equation with q-dependent RPA pairing vertex V(q) built from normal-state (Δ=0) susceptibilities.
-        Δ enters only via the anomalous pair amplitudes F_AA/F_AB. Sign convention: V>0 attractive, V<0 repulsive.
-
-        d-channel: V_d = <φ_d | V_ij_full | φ_d> / <φ_d|φ_d>
-            Full RPA vertex (spin + JT + cross), projected with φ_d = cos(kx)−cos(ky).
-            The d-wave formfactor cancels forward scattering (q≈0) and enhances the AFM spin-fluctuation peak at q=(π,π) → attractive pairing.
-
-        s-channel: V_s = <φ_s | V_ij_jt | φ_s> / <φ_s|φ_s>
-            JT-phonon vertex ONLY, FS-averaged with φ_s = 1.
-            The on-site inter-orbital singlet (Γ₆⊗Γ₇) is local → the pair does not exchange intersite magnons.
-            Therefore spin-fluctuation vertices are irrelevant and would only import the q≈0 FM/Pomeranchuk pole — a Stoner/charge instability.
-            The JT phonon vertex g²·χ_QQ_eff(q) is attractive at all q and carries the full Q-dependence through χ_QQ(q;Q) and K_eff(Q).
         """
         solver = self.solver
+        # --- Vertex cache invalidation (Δ-independent for normal-state part!) ---
+        staleness = (
+            not isinstance(vertex_cache, dict)
+            or abs(M - vertex_cache.get('M', 0.0)) > _M_THR_REL * float(np.sqrt(abs(det_afm_sc)))
+            or abs(Q - vertex_cache.get('Q', 0.0)) > max(_Q_THR_REL * solver.p.lambda_hop, 1e-4)
+            or (det_afm_sc * vertex_cache.get('det_afm_current', det_afm_sc)) < 0.0
+        )
+        if staleness:
+            # Compute kernel and obtain base cache
+            vertex_cache = solver.compute_pairing_kernel_and_build_cache(M, Q, n_kspace, mu, g_t, g_J, g_Delta_s, g_Delta_d, J_eff, Gamma_M, V_JT, V_cap, det_afm_sc, solve_state)
+            # ---- Add normal-state spin/JT determinantal info ----
+            chi_QQ_bare = solver._chi_QQ_matrix_elements(M, Q, 0.0j, 0.0j, n_kspace, mu, g_t, g_J)
+            E_k_cache_normal = solver._get_chi0_norm_cache(M, Q, n_kspace, mu, g_t, g_J, self)
+            _q_zero = np.zeros(2)
+            _q_afm  = np.array([np.pi, np.pi])
+
+            # Bare spin–orbital cross-vertex from the cluster-ED spin–JT cross-coupling J_MQ
+            U_SQ = r_MQ * math.sqrt(max(J_eff * V_JT, 0.0))
+
+            chi_SS_q0, chi_SQ_q0, chi_QS_q0, chi_QQ_q0 = solver.get_susceptibilities_normal(_q_zero, Gamma_M, chi_QQ_bare, E_k_cache_normal)
+            _det_q0 = solver._rpa_det(J_eff, V_JT, chi_SS_q0, chi_SQ_q0, chi_QS_q0, chi_QQ_q0, U_SQ)[0]
+
+            chi_SS_afm, chi_SQ_afm, chi_QS_afm, chi_QQ_afm = solver.get_susceptibilities_normal(_q_afm, Gamma_M, chi_QQ_bare, E_k_cache_normal)
+            _det_afm = solver._rpa_det(J_eff, V_JT, chi_SS_afm, chi_SQ_afm, chi_QS_afm, chi_QQ_afm, U_SQ)[0]
+
+            vertex_cache.update({
+                'det_q0':          _det_q0,
+                'det_afm':         _det_afm,
+                'det_afm_current': det_afm_sc,
+                'ansatz_unstable': det_afm_sc < 0.0,
+                'chi_QQ_afm':      chi_QQ_afm,
+                'chi_SS_afm':      chi_SS_afm,
+                'chi_SQ_afm':      chi_SQ_afm,
+                'E_k_cache_normal': E_k_cache_normal,
+            })
+
+        # ---- Anomalous pair amplitudes (always computed with current Δ) ----
+        uA, uB, vA, vB = _get_nambu_spinors(ec)
         arg = np.clip(ev / solver.kT, -100, 100)
         f12 = 1.0 - 2.0 / (1.0 + np.exp(arg))   # tanh(E/2kT); (N_k, 24)
-
-        uA, uB, vA, vB = _get_nambu_spinors(ec)
-
         # Per-k pair amplitudes (sum over 24 BdG bands, before BZ integration)
         pair_s_k = np.sum(
             (uA[:, 0, :] * np.conj(vA[:, 3, :]) - uA[:, 1, :] * np.conj(vA[:, 2, :])
-                + uB[:, 0, :] * np.conj(vB[:, 3, :]) - uB[:, 1, :] * np.conj(vB[:, 2, :])) * f12,
+            + uB[:, 0, :] * np.conj(vB[:, 3, :]) - uB[:, 1, :] * np.conj(vB[:, 2, :])) * f12,
             axis=1)
         pair_d_k = np.sum(
             0.5 * (uA[:, 0, :] * np.conj(vB[:, 3, :]) - uA[:, 1, :] * np.conj(vB[:, 2, :])
-                    + uB[:, 0, :] * np.conj(vA[:, 3, :]) - uB[:, 1, :] * np.conj(vA[:, 2, :])) * f12,
+                + uB[:, 0, :] * np.conj(vA[:, 3, :]) - uB[:, 1, :] * np.conj(vA[:, 2, :])) * f12,
             axis=1)
 
         # Full-BZ anomalous pair amplitudes F_AA/F_AB at the CURRENT (Δ, M, Q).
@@ -4834,248 +4925,28 @@ class VectorizedBdG:
         # It is returned as a DIAGNOSTIC value only: has not wired back yet into the M/Q/Delta_s/Delta_d Anderson-mixed self-consistency loop.
         pair_s7b_k = np.sum(
             (uA[:, 0, :] * np.conj(vA[:, 5, :]) - uA[:, 1, :] * np.conj(vA[:, 4, :])
-                + uB[:, 0, :] * np.conj(vB[:, 5, :]) - uB[:, 1, :] * np.conj(vB[:, 4, :])) * f12,
+            + uB[:, 0, :] * np.conj(vB[:, 5, :]) - uB[:, 1, :] * np.conj(vB[:, 4, :])) * f12,
             axis=1)
         pair_d7b_k = np.sum(
             0.5 * (uA[:, 0, :] * np.conj(vB[:, 5, :]) - uA[:, 1, :] * np.conj(vB[:, 4, :])
-                    + uB[:, 0, :] * np.conj(vA[:, 5, :]) - uB[:, 1, :] * np.conj(vA[:, 4, :])) * f12,
+                + uB[:, 0, :] * np.conj(vA[:, 5, :]) - uB[:, 1, :] * np.conj(vA[:, 4, :])) * f12,
             axis=1)
         F_AA7b_BZ = complex(np.dot(solver.k_weights, pair_s7b_k)) / 4.0
         F_AB7b_BZ = complex(np.dot(solver.k_weights, pair_d7b_k)) / 4.0
 
-        # --- Vertex cache invalidation (Δ-independent for normal-state part!) ---
-        _vc_is_dict = isinstance(_vertex_cache, dict)
-
-        # Preliminary N_fs estimate from cache (refined after FS recomputation if stale).
-        _N_fs_cached = len(_vertex_cache['fs_pts']) if (_vc_is_dict and _vertex_cache.get('fs_pts') is not None) else 0
-
-        _vertex_stale = (
-            not _vc_is_dict
-            or abs(Q - _vertex_cache.get('Q', 0.0)) > max(_Q_THR_REL * solver.p.lambda_hop, 1e-4)
-            or _vertex_cache.get('fs_pts') is None
-        )
-        # Adaptive M-staleness: tighten as det_afm_sc→0 (near QCP a small ΔM changes V(q) strongly).
-        _M_thr_adaptive = _M_THR_REL * float(np.sqrt(abs(det_afm_sc)))
-        if _vc_is_dict and abs(M - _vertex_cache.get('M', 0.0)) > _M_thr_adaptive:
-            _vertex_stale = True
-
-        # det_afm_sc sign-flip invalidation.
-        if _vc_is_dict and (det_afm_sc * _vertex_cache.get('det_afm_current', det_afm_sc)) < 0.0:
-            _vertex_stale = True
+        # ---- Extract vertex scalars and 2x2 kernel info from cache ----
+        V_s_scalar = vertex_cache['V_s_scalar']
+        V_d_scalar = vertex_cache['V_d_scalar']
+        lambda_lin_max = vertex_cache['lambda_lin_max']
+        v_s_raw = abs(vertex_cache['K_pair_v_s'])
+        v_d_raw = abs(vertex_cache['K_pair_v_d'])
         
-        # --- Fermi-surface points for vertex q-loop (normal-state geometry, Δ-independent) ---
-        # Skip recomputation when the vertex cache is still valid: FS topology changes slowly.
-        _fs_cached = (_vc_is_dict and _vertex_cache.get('fs_pts') is not None
-                      and not _vertex_stale)
-        if _fs_cached:
-            fs_pts = np.asarray(_vertex_cache['fs_pts'])
-            vF_arr = np.asarray(_vertex_cache.get('vF_arr', np.ones(len(fs_pts))))
-        else:
-            fs_pts, vF_arr, _, _, _ = solver._get_fs_points(M, Q, n_kspace, mu, g_t, g_J, store_cache=True, compute_vF=True)
-        N_fs = len(fs_pts)
-        phi_d = np.cos(fs_pts[:, 0]) - np.cos(fs_pts[:, 1])
-        phi_s = np.ones(N_fs)
-
-        # Update N_fs staleness check now that we know the real N_fs.
-        if _N_fs_cached != 0 and _N_fs_cached != N_fs:
-            _vertex_stale = True
-
-        J_A1g_diag, _ = solver.p.exchange_channels(Q, n_kspace, tx_bare, ty_bare, g_J, q_renorm)
-        J_eff = solver.p.Z * J_A1g_diag[0]
-
-        # Bare spin–orbital cross-vertex from the cluster-ED spin–JT cross-coupling J_MQ
-        U_SQ = r_MQ * math.sqrt(max(J_eff * V_JT, 0.0))
-
-        # Rayleigh-quotient λ_pair proxy: _{ij} = V(k_i−k_j) / √(|vF_i|·|vF_j|) is the linearised gap kernel. Rayleigh quotient with trial vector φ gives: λ ≈ <φ|Γ|φ>/<φ|φ> ≈ V_scalar · <φ²·(1/|vF|)>/<φ²> = V_scalar · N_eff
-        _inv_vF = solver._fs_integration_weights(fs_pts, vF_arr)
-
-        if _vertex_stale:
-            _q_zero = np.zeros(2)
-            _q_afm = np.array([np.pi, np.pi])
-            chi_QQ_bare = solver._chi_QQ_matrix_elements(M, Q, 0.0j, 0.0j, n_kspace, mu, g_t, g_J)
-            E_k_cache_normal = solver._get_chi0_norm_cache(M, Q, n_kspace, mu, g_t, g_J, self)
-
-            # FM/Pomeranchuk QCP check at q=0
-            chi_SS_q0, chi_SQ_q0, chi_QS_q0, chi_QQ_q0 = solver.get_susceptibilities_normal(_q_zero, Gamma_M, chi_QQ_bare, E_k_cache_normal)
-            _det_q0 = solver._rpa_det(J_eff, V_JT, chi_SS_q0, chi_SQ_q0, chi_QS_q0, chi_QQ_q0, U_SQ)[0]
-
-            # AFM QCP check at q=(π,π) — normal-state (Δ=0); used for V(q) vertex and gap equation.
-            chi_SS_afm, chi_SQ_afm, chi_QS_afm, chi_QQ_afm = solver.get_susceptibilities_normal(_q_afm, Gamma_M, chi_QQ_bare, E_k_cache_normal)
-            _det_afm = solver._rpa_det(J_eff, V_JT, chi_SS_afm, chi_SQ_afm, chi_QS_afm, chi_QQ_afm, U_SQ)[0]
-
-            # --- Build vertex matrices on the FS  ---
-            if N_fs > _VERTEX_DIAG_MIN_FS:
-                i_idx, j_idx, unique_q, inv_idx = solver._unique_q_pairs(fs_pts)
-
-                V_unique = np.empty(len(unique_q), dtype=float)
-                V_jt_u   = np.empty(len(unique_q), dtype=float)
-                for ui, q_u in enumerate(unique_q):
-                    chi_SS, chi_SQ, chi_QS, chi_QQ = solver.get_susceptibilities_normal(q_u, Gamma_M, chi_QQ_bare, E_k_cache_normal)
-                    V_unique[ui] = solver._rpa_vertex(J_eff, V_JT, chi_SS, chi_SQ, chi_QS, chi_QQ, V_cap, U_SQ)
-                    V_jt_u[ui]   = solver._rpa_vertex(0.0,   V_JT, chi_SS, chi_SQ, chi_QS, chi_QQ, V_cap, U_SQ)
-                
-                V_ij_full = np.zeros((N_fs, N_fs), dtype=float)
-                V_ij_full[i_idx, j_idx] = V_unique[inv_idx]
-                V_ij_full = 0.5 * (V_ij_full + V_ij_full.T)
-                
-                V_ij_jt = np.zeros((N_fs, N_fs), dtype=float)
-                V_ij_jt[i_idx, j_idx] = V_jt_u[inv_idx]
-                V_ij_jt = 0.5 * (V_ij_jt + V_ij_jt.T)
-
-                # --- s-FS: V_jt on the uniformly-weighted point set (K11 in 2×2 kernel) ---
-                fs_pts_s, vF_arr_s, _, _, _ = solver._get_fs_points(M, Q, n_kspace, mu, g_t, g_J, store_cache=True, compute_vF=True, prefer_dwave=False)
-                N_fs_s = len(fs_pts_s)
-                if N_fs_s < 4:
-                    fs_pts_s, vF_arr_s, N_fs_s = fs_pts, vF_arr, N_fs   # degenerate fallback
-                _inv_vF_s = solver._fs_integration_weights(fs_pts_s, vF_arr_s)
-
-                i_idx_s, j_idx_s, unique_q_s, inv_idx_s = solver._unique_q_pairs(fs_pts_s)
-                V_jt_u_s = np.empty(len(unique_q_s), dtype=float)
-                for u_idx, q_u in enumerate(unique_q_s):
-                    chi_SS_s, chi_SQ_s, chi_QS_s, chi_QQ_s = solver.get_susceptibilities_normal(q_u, Gamma_M, chi_QQ_bare, E_k_cache_normal, _enforce_c4=False)
-                    V_jt_u_s[u_idx] = solver._rpa_vertex(0.0, V_JT, chi_SS_s, chi_SQ_s, chi_QS_s, chi_QQ_s, V_cap, U_SQ)
-                V_ij_jt_s = np.zeros((N_fs_s, N_fs_s), dtype=float)
-                V_ij_jt_s[i_idx_s, j_idx_s] = V_jt_u_s[inv_idx_s]
-                V_ij_jt_s = 0.5 * (V_ij_jt_s + V_ij_jt_s.T)
-
-                # --- 2×2 pairing kernel K_pair in (s, d) basis --- (computed once per stale cycle)
-                # K11 on s-FS (φ_s≡1, uniform sampling); K22/K12 on d-FS (φ_d²-weighted).
-                phi_s_k   = np.ones(N_fs_s, dtype=float)
-                phi_s_d_k = np.ones(N_fs, dtype=float)
-                phi_d_k   = np.cos(fs_pts[:, 0]) - np.cos(fs_pts[:, 1])
-
-                W_mat   = np.outer(np.sqrt(_inv_vF),   np.sqrt(_inv_vF))
-                W_mat_s = np.outer(np.sqrt(_inv_vF_s), np.sqrt(_inv_vF_s))
-
-                def _fs_avg(phi_a, phi_b, V_ij, W):
-                    return float(phi_a @ (V_ij * W) @ phi_b)
-
-                ns = max(float(np.dot(phi_s_k**2, _inv_vF_s)), 1e-12)
-                nd = max(float(np.dot(phi_d_k**2, _inv_vF)), 1e-12)
-
-                K11 = g_Delta_s * _fs_avg(phi_s_k, phi_s_k, V_ij_jt_s, W_mat_s) / ns
-                K22 = g_Delta_d * _fs_avg(phi_d_k, phi_d_k, V_ij_full, W_mat)   / nd
-                K12 = (np.sqrt(max(g_Delta_s * g_Delta_d, 0.0))
-                       * _fs_avg(phi_s_d_k, phi_d_k, V_ij_jt, W_mat)
-                       / max(np.sqrt(ns * nd), 1e-12))
-
-                _K_pair = np.array([[K11, K12], [K12, K22]], dtype=float)
-                K_evals, K_evecs = np.linalg.eigh(_K_pair)
-                _lambda_2x2 = float(K_evals[-1])
-                _v_s_cached = float(K_evecs[0, -1])
-                _v_d_cached = float(K_evecs[1, -1])
-
-                # --- Channel projections (vF+dl weighted Rayleigh quotient: λ = <φ|V|φ>_w / <φ|φ>_w) ---
-                _w_vF   = np.sqrt(_inv_vF)   # w_i = √(dl_i/|vF_i|)
-                phi_s_w = phi_s * _w_vF
-                phi_d_w = phi_d * _w_vF
-                phi_s_norm = max(float(np.dot(phi_s_w, phi_s_w)), 1e-12)
-                phi_d_norm = max(float(np.dot(phi_d_w, phi_d_w)), 1e-12)
-
-                # s-channel: JT phonon only (on-site singlet does not couple to intersite magnon exchange; excluding V_spin avoids the q≈0
-                V_s_scalar = float(phi_s_w @ V_ij_jt @ phi_s_w) / phi_s_norm
-                V_s_scalar = float(np.clip(V_s_scalar, -V_cap, V_cap))
-
-                # d-channel: full RPA vertex (spin + JT + cross), φ_d cancels q≈0 forward scattering and enhances the AFM peak at q=(π,π)
-                V_d_proj   = phi_d_w @ V_ij_full
-                V_d_scalar = float(np.dot(phi_d_w, V_d_proj)) / phi_d_norm
-                V_d_scalar = float(np.clip(V_d_scalar, -V_cap, V_cap))
-
-                # --- V_d EMA: signed tracking with sign-flip suppression ---
-                # Sign-flip guard: when a flip is detected we blend with a det_afm-dependent weight
-                if _solve_state.V_d_ema is None:
-                    # Cold start (first iter, or after a topology reset by caller).
-                    _solve_state.V_d_ema = V_d_scalar
-                else:
-                    _sign_flipped = (V_d_scalar * _solve_state.V_d_ema < 0.0
-                                     and abs(_solve_state.V_d_ema) > _V_PREV_SIGN_FLOOR)
-                    if _sign_flipped:
-                        if V_d_scalar > 0.0:
-                            _ema_w = _EMA_NEW_WEIGHT
-                        else:
-                            _ema_w = _EMA_NEW_WEIGHT * (_EMA_SIGN_FLIP_W_MIN + (1.0 - _EMA_SIGN_FLIP_W_MIN)
-                                                        / (1.0 + math.exp(-_EMA_SIGN_FLIP_SLOPE * (abs(_det_afm) / _DET_SIGN_FLIP_SCALE - 0.5))))
-                    else:
-                        # Post-kick: EMA catches up with the new configuration faster
-                        _kick_boost = 2.0 if _solve_state._ema_kick_pending else 1.0
-                        _ema_w = min(_EMA_NEW_WEIGHT * _kick_boost, 1.0)
-                    _solve_state._ema_kick_pending = False   # consumed regardless of path
-                    _solve_state.V_d_ema = (1.0 - _ema_w) * _solve_state.V_d_ema + _ema_w * V_d_scalar
-                    V_d_scalar = _solve_state.V_d_ema
-
-                # V_ij_full structure flags for SCF log
-                V_flat          = V_ij_full[i_idx, j_idx]
-                _vmat_low_var   = float(np.std(V_flat)) < _VMAT_LOW_VAR_FRAC * abs(float(np.mean(V_flat))) + 1e-12
-                _vmat_same_sign = (float(np.min(V_flat)) > 0.0) or (float(np.max(V_flat)) < 0.0)
-
-                # q-resolved vertex diagnostics: V_afm > 0 (AFM peak attractive), V_fwd < 0 (forward repulsive, cancelled by φ_d).
-                _q_norms_vc  = np.linalg.norm(unique_q, axis=1)
-                _afm_mask_vc = _q_norms_vc > np.pi * _V_AFM_Q_MIN
-                _fwd_mask_vc = _q_norms_vc < np.pi * _V_FWD_Q_MAX
-                _V_afm_mean  = float(np.mean(V_unique[_afm_mask_vc])) if _afm_mask_vc.any() else float('nan')
-                _V_fwd_mean  = float(np.mean(V_unique[_fwd_mask_vc])) if _fwd_mask_vc.any() else float('nan')
-                _V_neg_frac  = float(np.mean(V_unique < 0.0))
-            else:
-                V_d_proj        = np.zeros(N_fs)
-                V_d_scalar      = 0.0
-                V_s_scalar      = self.g_JT**2 / max(solver._K_bare, _MATH_EPS)
-                _vmat_low_var   = False
-                _vmat_same_sign = False
-                _solve_state.V_d_ema = None
-                _lambda_2x2  = 0.0
-                _v_s_cached  = 1.0
-                _v_d_cached  = 0.0
-                fs_pts_s     = fs_pts
-                vF_arr_s     = vF_arr
-                N_fs_s       = N_fs
-                _inv_vF_s    = _inv_vF
-            
-            _vertex_cache = {
-                'M': M,
-                'Q': Q,
-                'fs_pts': fs_pts.copy(),
-                'vF_arr': vF_arr.copy(),
-                'fs_pts_s': fs_pts_s.copy(),
-                'vF_arr_s': vF_arr_s.copy(),
-                'V_s_scalar': V_s_scalar,
-                'V_d_scalar': V_d_scalar,
-                'V_d_proj': V_d_proj.copy(),
-                'phi_d': phi_d.copy(),
-                'det_q0': _det_q0,
-                'det_afm': _det_afm,
-                'det_afm_current' : det_afm_sc,
-                'ansatz_unstable': det_afm_sc < 0.0,
-                'chi_QQ_afm': chi_QQ_afm,
-                'chi_SS_afm': chi_SS_afm,
-                'chi_SQ_afm': chi_SQ_afm,
-                'vmat_low_var': _vmat_low_var,
-                'vmat_same_sign': _vmat_same_sign,
-                'V_afm_mean': _V_afm_mean,   # mean V(q) at |q|>_V_AFM_Q_MIN·π (AFM region)
-                'V_fwd_mean': _V_fwd_mean,   # mean V(q) at |q|<_V_FWD_Q_MAX·π (forward region)
-                'V_neg_frac': _V_neg_frac,   # fraction q with V<0; >0.9 → globally repulsive
-                'K_pair_lambda': _lambda_2x2,
-                'K_pair_v_s': _v_s_cached,
-                'K_pair_v_d': _v_d_cached,
-                'E_k_cache_normal': E_k_cache_normal,
-            }
-        
-        # d-wave: DOS-weighted Rayleigh  <φ_d²·(1/|vF|)> / <φ_d²>
-        _phi_d   = _vertex_cache['phi_d']
-        _N_eff_d = float(np.dot(_phi_d**2, _inv_vF)) / max(float(np.dot(_phi_d, _phi_d)), 1e-12)
-        # s-wave: uniform trial vector → mean(1/|vF|)
-        _N_eff_s = float(np.mean(_inv_vF))
-
-        # max(V, 0): only attractive channels drive the pairing instability
-        lambda_d_ray = max(g_Delta_d * _vertex_cache['V_d_scalar'] * _N_eff_d, 0.0)
-        lambda_s_ray = max(g_Delta_s * _vertex_cache['V_s_scalar'] * _N_eff_s, 0.0)
-        _vertex_cache['lambda_pair'] = max(lambda_d_ray, lambda_s_ray)
-
         # Gap equations + jump limiter: F_AA_BZ / F_AB_BZ already carry BdG saturation via the anomalous Green functions, so a λ_pair-based f_stab would double-count the suppression, channel ratio (s vs d) is preserved during clamping.
-        V_s = _vertex_cache['V_s_scalar']
-        V_d = _vertex_cache['V_d_scalar']
-
-        Delta_s_raw = (g_Delta_s * V_s * F_AA_BZ) if V_s > 0.0 else 0.0j
-        Delta_d_raw = (g_Delta_d * V_d * F_AB_BZ) if V_d > 0.0 else 0.0j
+        Delta_s_raw = (g_Delta_s * V_s_scalar * F_AA_BZ) if V_s_scalar > 0.0 else 0.0j
+        Delta_d_raw = (g_Delta_d * V_d_scalar * F_AB_BZ) if V_d_scalar > 0.0 else 0.0j
+        # Γ6-Γ7b gap values
+        Delta_s7b_raw = (g_Delta_s * V_s_scalar * F_AA7b_BZ) if V_s_scalar > 0.0 else 0.0j
+        Delta_d7b_raw = (g_Delta_d * V_d_scalar * F_AB7b_BZ) if V_d_scalar > 0.0 else 0.0j
 
         # Det-proportional jump cap: past the QCP the RPA vertex is unreliable; limit the gap step.
         if det_afm_sc < 0.0:
@@ -5083,79 +4954,56 @@ class VectorizedBdG:
             effective_jump_cap = max(_JUMP_CAP_FLOOR, _DELTA_JUMP_CAP * math.exp(-_DET_JUMP_HALF_SCALE * _det_depth))
         else:
             effective_jump_cap = _DELTA_JUMP_CAP
-        
-        # Raw fixed-point amplitudes flow into the 2×2 blend UNCAPPED
-        Delta_s_new, Delta_d_new = Delta_s_raw, Delta_d_raw
 
-        # Build the 2×2 pairing kernel K_pair in the (s, d) channel basis.
-        #    K_pair = [[g_s·V_ss, √(g_s·g_d)·V_sd],
-        #              [√(g_s·g_d)·V_sd, g_d·V_dd]]
-        # where FS-averaged vertex integrals: V_ab = Σ_{k,k'} φ_a(k)·V(k−k')·φ_b(k')·w_k·w_k' / (N_a·N_b), using the full RPA vertex at Δ=0 and need unique q=k−k' vectors
-        # The dominant eigenvector gives the optimal Δ_s/Δ_d hybridisation — avoids artificial channel locking from independent fixed-point iteration and naturally handles the B₁g optimum when both channels have similar λ.
-        _lambda_2x2 = float(_vertex_cache['K_pair_lambda'])
-        _v_s_cached = float(_vertex_cache['K_pair_v_s'])
-        _v_d_cached = float(_vertex_cache['K_pair_v_d'])
-
-        if _vertex_cache.get('fs_pts') is None or len(_vertex_cache['fs_pts']) < 4:
-            return 0.0j, 0.0j, 1.0, 1.0, None, 0.0j, 0.0j
-
+        # ---- Blend with 2x2 kernel direction ----
         # L1-normalised eigenvector from cache; align sign with current (Δ_s, Δ_d) direction.
-        v_s_raw = abs(_v_s_cached)
-        v_d_raw = abs(_v_d_cached)
-        overlap = (np.conj(Delta_s_new) * v_s_raw + np.conj(Delta_d_new) * v_d_raw).real
+        overlap = (np.conj(Delta_s_raw) * v_s_raw + np.conj(Delta_d_raw) * v_d_raw).real
         sign_align = 1.0 if overlap >= 0 else -1.0
-        _v_s = v_s_raw * sign_align
-        _v_d = v_d_raw * sign_align
-        _v_norm = max(abs(_v_s) + abs(_v_d), 1e-12)
-        _v_s /= _v_norm
-        _v_d /= _v_norm
+        v_s = v_s_raw * sign_align
+        v_d = v_d_raw * sign_align
+        v_norm = max(abs(v_s) + abs(v_d), 1e-12)
+        v_s /= v_norm
+        v_d /= v_norm
 
-        _D_fp = abs(Delta_s_new) + abs(Delta_d_new)
+        D_fp = abs(Delta_s_raw) + abs(Delta_d_raw)
         # Seed phase: gap is negligible → inject from 2×2 kernel
-        if _D_fp < _QQ_DELTA_THRESH:
-            _D_fp = float(np.clip(
-                g_t * solver.p.t0 * math.exp(-1.0 / float(np.clip(_lambda_2x2, 1e-2, 5.0))) * _BCS_SEED_FRACTION,   # BCS weak-coupling estimate: Δ ~ t·exp(-1/λ_2x2)
-                1.0e-7,
-                _BCS_SEED_FRACTION * g_t * solver.p.t0
-            ))
-            _alpha_blend = 0.5 * _ALPHA_MIX_2X2
+        if D_fp < _QQ_DELTA_THRESH:
+            D_fp = float(np.clip(
+                g_t * solver.p.t0 * math.exp(-1.0 / max(lambda_lin_max, 1e-2)) * _BCS_SEED_FRACTION,
+                1.0e-7, _BCS_SEED_FRACTION * g_t * solver.p.t0))
+            alpha_blend = 0.5 * _ALPHA_MIX_2X2
         else:
-            _alpha_blend = _ALPHA_MIX_2X2
-        
-        _Ds_2x2 = _D_fp * _v_s
-        _Dd_2x2 = _D_fp * _v_d
+            alpha_blend = _ALPHA_MIX_2X2
 
-        # Phase-preserving blend: the 2×2 kernel only constrains the REAL relative sign between s and d; it carries no opinion on a genuine complex relative phase between Delta_s_new and Delta_d_new.
+        Ds_2x2 = D_fp * v_s
+        Dd_2x2 = D_fp * v_d
+        
+        # Phase-preserving blend: the 2×2 kernel only constrains the REAL relative sign between s and d;
         # Blending magnitudes and then multiplying by a real _v_s/_v_d would silently zero that phase every iteration.
-        _phase_s_new = Delta_s_new / max(abs(Delta_s_new), 1e-30)
-        _phase_d_new = Delta_d_new / max(abs(Delta_d_new), 1e-30)
+        phase_s_new = Delta_s_raw / max(abs(Delta_s_raw), 1e-30)
+        phase_d_new = Delta_d_raw / max(abs(Delta_d_raw), 1e-30)
         
         # Smooth fallback: if fixed-point gives nothing
-        _Ds_mag = (1.0 - _alpha_blend) * max(abs(Delta_s_new), _KERNEL_DIR_MIN_FRAC * abs(_Ds_2x2)) + _alpha_blend * abs(_Ds_2x2)
-        _Dd_mag = (1.0 - _alpha_blend) * max(abs(Delta_d_new), _KERNEL_DIR_MIN_FRAC * abs(_Dd_2x2)) + _alpha_blend * abs(_Dd_2x2)
-
+        Ds_mag = (1.0 - alpha_blend) * max(abs(Delta_s_raw), _KERNEL_DIR_MIN_FRAC * abs(Ds_2x2)) + alpha_blend * abs(Ds_2x2)
+        Dd_mag = (1.0 - alpha_blend) * max(abs(Delta_d_raw), _KERNEL_DIR_MIN_FRAC * abs(Dd_2x2)) + alpha_blend * abs(Dd_2x2)
+        
         # Below the seed threshold there is no meaningful fixed-point phase yet — use the real 2×2-kernel sign directly.
         # Above threshold, keep whatever complex phase the BdG self-consistency produced.
-        if _D_fp < _QQ_DELTA_THRESH:
-            _Ds = complex(_Ds_mag * np.sign(_v_s) if _v_s != 0.0 else _Ds_mag)
-            _Dd = complex(_Dd_mag * np.sign(_v_d) if _v_d != 0.0 else _Dd_mag)
+        if D_fp < _QQ_DELTA_THRESH:
+            Ds = complex(Ds_mag * np.sign(v_s) if v_s != 0.0 else Ds_mag)
+            Dd = complex(Dd_mag * np.sign(v_d) if v_d != 0.0 else Dd_mag)
         else:
-            _Ds = _Ds_mag * _phase_s_new
-            _Dd = _Dd_mag * _phase_d_new
-
+            Ds = Ds_mag * phase_s_new
+            Dd = Dd_mag * phase_d_new
+        
         # Single, final hard cap: compares the fully-blended/seeded output against the PHYSICAL ceiling
-        _phys_ceiling = effective_jump_cap * max(abs(Delta_s) + abs(Delta_d), _DELTA_ABS_FLOOR)
-        _D_new = abs(_Ds) + abs(_Dd)
-        if _D_new > _phys_ceiling:
-            _scale = _phys_ceiling / max(_D_new, 1e-12)
-            _Ds *= _scale
-            _Dd *= _scale
-
-        # Γ6-Γ7b gap values
-        Delta_s7b_raw = (g_Delta_s * V_s * F_AA7b_BZ) if V_s > 0.0 else 0.0j
-        Delta_d7b_raw = (g_Delta_d * V_d * F_AB7b_BZ) if V_d > 0.0 else 0.0j
-        return complex(_Ds), complex(_Dd), _v_s, _v_d, _vertex_cache, complex(Delta_s7b_raw), complex(Delta_d7b_raw)
-
+        phys_ceiling = effective_jump_cap * max(abs(Delta_s) + abs(Delta_d), _DELTA_ABS_FLOOR)
+        D_new = abs(Ds) + abs(Dd)
+        if D_new > phys_ceiling:
+            scale = phys_ceiling / max(D_new, 1e-12)
+            Ds *= scale
+            Dd *= scale
+        return complex(Ds), complex(Dd), complex(Delta_s7b_raw), complex(Delta_d7b_raw), vertex_cache
 
 class OptimPoint:
     __slots__ = ('doping', 'Delta_tetra', 'u', 'g_JT', 't_pd',
@@ -5899,7 +5747,7 @@ class UnifiedBayesianOptimizer:
         if result.get('mott_suspect', False):
             return 0.0
         _g_t_sc = float(result.get('g_t', 1.0))
-        _xia_sc = float(result.get('xi_over_a', float('nan')))
+        _xia_sc = float(result.get('xi_nodal', float('nan')))
         if _g_t_sc < _G_T_COHERENCE_MIN or (np.isfinite(_xia_sc) and _xia_sc < 1.0):
             return 0.0
 
@@ -6056,25 +5904,25 @@ if __name__ == "__main__":
     """, flush=True)
 
     params = ModelParams(
-        t_pd         = 0.520,
-        u            = 20.000,
-        lambda_soc   = 0.030,
-        Delta_tetra  = -0.120,
-        g_JT         = 0.300,
-        K_lattice    = 0.800,
-        lambda_hop   = 0.900,
-        g_Eg2        = 0.180,
-        K_lattice_Eg2= 0.800,
-        Delta_CT     = 1.700,
-        Delta_B1g_static= -0.02,
-        hybrid_scale = 3.800,
-        Upp_ratio    = 0.4,
-        Z            = 4,
-        kT           = 0.006,
-        tol          = 1e-4,
+        t_pd             = 0.480,
+        u                = 15.000,
+        lambda_soc       = 0.040,
+        Delta_tetra      = -0.060,
+        g_JT             = 0.260,
+        K_lattice        = 0.900,
+        lambda_hop       = 1.400,
+        g_Eg2            = 0.100,
+        K_lattice_Eg2    = 1.500,
+        Delta_CT         = 1.550,
+        Delta_B1g_static = -0.018,
+        hybrid_scale     = 4.200,
+        Upp_ratio_bare   = 0.4,
+        Z                = 4,
+        kT               = 0.006,
+        tol              = 1e-4,
         )
 
-    target_doping = 0.132
+    target_doping = 0.142
     doping_margin = 0.20          # scan covers target ± 20 %
     min_doping    = max(target_doping * (1.0 - doping_margin), _G_T_COHERENCE_MIN / (2.0 - _G_T_COHERENCE_MIN))
     max_doping    = target_doping * (1.0 + doping_margin)
@@ -6229,24 +6077,24 @@ if __name__ == "__main__":
     _ref_result = results.get("ref")
     # ── Sections 2: SCF diagnostics, SC-JT window, Tc pre-estimates ────────
     if _ref_result is not None:
-        _lmax_ref = float(_ref_result['lambda_lin_max'])
-        _V_spin   = float(_ref_result['V_spin_mean'])
-        _V_JT     = float(_ref_result['V_JT_mean'])
-        _V_cr     = float(_ref_result['V_cross_mean'])
-        _V_tot    = float(_ref_result['V_rpa_mean'])
-        _hessian  = _ref_result['hessian_result']
-        _w        = _ref_result['w']
-        _ref_M    = _ref_result['M']
-        _ref_Q    = _ref_result['Q']
+        V_spin_mean  = float(_ref_result['V_spin_mean'])
+        V_JT_mean    = float(_ref_result['V_JT_mean'])
+        V_rpa_mean   = float(_ref_result['V_rpa_mean'])
+        _V_cr        = V_rpa_mean - V_spin_mean - V_JT_mean
         lambda_JT_sc = _ref_result['lambda_JT_sc']
+        _lmax_ref    = _ref_result['lambda_lin_max']
+        _hessian     = _ref_result['hessian_result']
+        _frac        = _ref_result['frac']
+        _ref_M       = _ref_result['M']
+        _ref_Q       = _ref_result['Q']
 
         _scf_log("REF-SCF", f"  converged={_ref_result['converged']}  mott_suspect={_ref_result.get('mott_suspect', False)}")
         _scf_log("REF-SCF", f"  M={_ref_M:.4f}  Q={_ref_Q:+.5f}  Δs={_ref_result['Delta_s']:.5f} eV  Δd={_ref_result['Delta_d']:.5f} eV  μ={_ref_result['mu']:.4f} eV")
         _scf_log("REF-SCF", f"  Irrep R={_ref_result['selection_ratio']:.4f}  JT {'ALLOWED ✓' if _ref_result['selection_ratio'] > 0.02 else 'BLOCKED ✗'}")
 
         # — SC-JT window: K_eff path (Δ=0 → Δ≠0) and χ_τ —
-        _rig_sc = _ref_result['rigidity_sc']
-        _rig_n  = _ref_result['rigidity_n']
+        _rig_sc   = _ref_result['rigidity_sc']
+        _rig_n    = _ref_result['rigidity_n']
         _K_eff_sc = _rig_sc['K_eff']
         _K_eff_n  = _rig_n['K_eff']
         _dK_eff   = _K_eff_sc - _K_eff_n   # negative → gap softens lattice
@@ -6290,36 +6138,33 @@ if __name__ == "__main__":
 
         # — RPA vertex decomposition (appended to G-MATRIX block, uses SCF vertex) —
         # d-wave: negative FS-average is EXPECTED; instability comes from q≈(π,π) backscattering
-        if np.isfinite(_V_tot) and abs(_V_tot) > 1e-4:
-            _v_note = ('⚠ V_avg<0: d-wave backscattering dominant (normal)' if _V_tot < 0 else '✓ positive avg')
-            _scf_log("G-MATRIX", f"V_RPA(FS-avg)={_V_tot:.4f} eV  [{_v_note}]"
-                     f"  spin={_V_spin/_V_tot*100:.0f}%  JT={_V_JT/_V_tot*100:.0f}%  cross={_V_cr/_V_tot*100:.0f}%")
-        elif np.isfinite(_V_tot):
-            _scf_log("G-MATRIX", f"V_RPA(FS-avg)={_V_tot:.2e} eV"
-                     f"  [spin={_V_spin:.3f}  V_JT={_V_JT:.3f}  cross={_V_cr:.3f} eV]")
+        if np.isfinite(V_rpa_mean) and abs(V_rpa_mean) > 1e-4:
+            _v_note = ('⚠ V_avg<0: d-wave backscattering dominant (normal)' if V_rpa_mean < 0 else '✓ positive avg')
+            _scf_log("G-MATRIX", f"V_RPA(FS-avg)={V_rpa_mean:.4f} eV  [{_v_note}]"
+                     f"  spin={V_spin_mean/V_rpa_mean*100:.0f}%  JT={V_JT_mean/V_rpa_mean*100:.0f}%  cross={_V_cr/V_rpa_mean*100:.0f}%")
+        elif np.isfinite(V_rpa_mean):
+            _scf_log("G-MATRIX", f"V_RPA(FS-avg)={V_rpa_mean:.2e} eV"
+                     f"  [spin={V_spin_mean:.3f}  V_JT={V_JT_mean:.3f}  cross={_V_cr:.3f} eV]")
         
         # — Linearised gap equation & channel decomposition —
         _scf_log("SCF-RES", f"Gap eq: λ_lin_max={_lmax_ref:.4f}  g_Δ={_ref_result['g_delta_dom']:.3f}")
 
-        if _w is not None:
-            _w_s = _w[0]
-            _w_d = _w[1]
-            _norm_sd = max(_w_s + _w_d, 1e-10)
+        if _frac is not None:
             _ch_note  = _ref_result['gap_symmetry']
             _neg_note = '  [⚠ λ<0: FS-avg repulsive — instability requires nodal sign change]' if _lmax_ref < 0 else ''
-            _scf_log("SCF-RES", f"  Channel: λ_s={_lmax_ref * _w_s / _norm_sd:.4f}"
-                     f"  λ_d={_lmax_ref * _w_d / _norm_sd:.4f}  [{_ch_note}]{_neg_note}")
+            _scf_log("SCF-RES", f"  Channel: λ_s={_lmax_ref * _frac[0]:.4f}"
+                     f"  λ_d={_lmax_ref * _frac[1]:.4f}  [{_ch_note}]{_neg_note}")
         
         # — Coherence lengths (single line; orbital selectivity shown when relevant) —
         if not _ref_result['valid_BdG']:
-            _xi_note = (f"⚠ ξ_nodal/a={_ref_result['xi_over_a']:.2f} < 2 — BdG marginal"
+            _xi_note = (f"⚠ ξ_nodal/a={_ref_result['xi_nodal']:.2f} < 2 — BdG marginal"
                         f"  ξ_anti/a={_ref_result.get('xi_antinodal', float('nan')):.2f}")
         elif _ref_result['orbital_selective']:
-            _xi_note = (f"✓ ξ_nodal/a={_ref_result['xi_over_a']:.2f}"
+            _xi_note = (f"✓ ξ_nodal/a={_ref_result['xi_nodal']:.2f}"
                         f"  ξ_anti/a={_ref_result.get('xi_antinodal', float('nan')):.2f}"
                         f"  ORBITAL-SEL: ξ_Γ6/a={_ref_result['xi_Gamma6']:.2f}  ξ_Γ7/a={_ref_result['xi_Gamma7']:.2f}")
         else:
-            _xi_note = (f"✓ ξ_nodal/a={_ref_result['xi_over_a']:.2f}"
+            _xi_note = (f"✓ ξ_nodal/a={_ref_result['xi_nodal']:.2f}"
                         f"  ξ_anti/a={_ref_result.get('xi_antinodal', float('nan')):.2f}"
                         f"  orbitally uniform")
         _scf_log("SCF-RES", f"  [{_xi_note}]")
@@ -6341,7 +6186,7 @@ if __name__ == "__main__":
                  f"  J_eff={_ref_result['J_eff']:.4f} eV"
                  f"  J·χ_SS={_stoner_r:.4f} [{_ston_status}]"
                  f"  RPA×={_ref_result['rpa_factor']:.3f}"
-                 f"  q_renorm={_ref_result['r_Q']:.3f}")
+                 f"  r_Q={_ref_result['r_Q']:.3f}")
 
         # χ_τ: B1g orbital susceptibility — SC-induced enhancement is the decisive signal
         _scf_log("SCF-RES", (
@@ -6391,7 +6236,7 @@ if __name__ == "__main__":
         ))
 
         # — χ_SQ(q) full BZ scan ────────────────────────────────────────────
-        solver_ref.estimate_chi_SQ_q_full(target_doping, _ref_M, _ref_result['n_kspace'], _ref_result['mu'], _ref_result['J_eff'], _ref_result['r_Q'], _ref_result['F67s_mf'],  n_q=35)
+        solver_ref.estimate_chi_SQ_q_full(target_doping, _ref_M, _ref_Q, _ref_result['Delta_s'], _ref_result['Delta_d'], _ref_result['n_kspace'], _ref_result['mu'], _ref_result['J_eff'], _ref_result['r_Q'], _ref_result['F67s_mf'],  n_q=35)
 
         # Three independent Tc estimates (no shared label):
         #   Tc₁: McMillan (analytical, ω_SF = J_eff)
