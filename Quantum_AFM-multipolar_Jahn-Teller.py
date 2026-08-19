@@ -30,7 +30,7 @@ _GW_G_T_NUMERATOR     : float = 2.0                 # g_t = 2δ/(1+δ)  Gutzwill
 _PI_INT               : int   = 314159              # π in scaled integer units
 
 # ── Fermi surface sampling and k-grid ──────────────────────────────────────────
-_NK                   : int   = 64                  # k-grid points per direction (even required for commensurate q_AFM=(π,π))
+_NK                   : int   = 72                  # k-grid points per direction (even required for commensurate q_AFM=(π,π))
 _N_FS                 : int   = 130                 # FS k-points used in the vertex q-loop; samples the full k-grid, angular resolution need to resolve the d-wave node at (π/2,π/2) and the B₁g anti-nodal hot spots.
 _FS_SAMPLING          : float = 4.4                 # integration window around the Fermi level
 _FS_THERMAL_THRESHOLD : float = 0.0025              # 1% of peak value of f(E)*(1-f(E)) = 1/4, used as baseline for thermal FS weight
@@ -112,7 +112,7 @@ _MODE_PULL_FRAC       : float = 0.30                # fraction of (M − M_phys_
 _KICK_M_EXCESS_CTR    : float = 0.70                
 _KICK_JCHI_EXCESS_CTR : float = 0.70
 _KICK_REDUCTION_AMP   : float = 3.88                # amplitude of M-kick reduction: M_kick × (1 − this × excess)
-_KICK_BOOST_Q         : float = 0.006               # Q-kick boost
+_KICK_BOOST_Q         : float = 0.01                # Q-kick boost
 _KICK_M_CLIP_LO       : float = 0.02                # hard lower clip on M_kick (normal SCF path)
 _KICK_M_CLIP_HI       : float = 0.9                 # hard upper clip on M_kick
 _KICK_DELTA_MAX_FRAC  : float = 0.4                 # maximum allowed seed gap as a fraction of the effective hopping scale t_eff.
@@ -120,6 +120,7 @@ _KICK_MIXING_FLOOR    : float = 0.004               # minimum mixing weight in t
 _KICK_MIXING_SCALE    : float = 4.0                 # damping scale for λ_plus in α = _MIXING / (1 + scale·log1p(λ_plus)).
 _M0_S_CLIP_MAX        : float = 5.0                 # upper clip for Stoner (prevents M divergence at large J/W)
 _M0_WARMSTART_MIN     : float = 0.1                 # |M| below this is treated as "no real information" (crude/near-zero seed), not a genuine converged warm start
+_EARLY_KICK_BASE      : float = 0.01                # base step fraction in the coupled space
 
 # ── SCF iteration / mixing adaptive control ─────────────────────────────────────
 _MAX_ITER             : int   = 700
@@ -647,11 +648,9 @@ class ModelParams:
         eta_J7b = float(np.sqrt(max(_J7b / max(_J6, 1e-9), 0.0)))  # orbital-weight ratio, Γ7b
 
         # free d-site probability (1−δ): fraction of singly occupied sites; suppresses J_eff towards the overdoped limit.
-        J_A1g_diag = n_kspace * g_J * self.J_pdct * (tx_bare**2 + ty_bare**2) * np.array(
-            [1.0, 1.0, eta_J7a**2, eta_J7a**2, eta_J7b**2, eta_J7b**2]
-        ) / 2.0  # single-bond ZSA superexchange: even, longitudinal scale
+        J_A1g_diag = n_kspace * g_J * self.J_pdct * (tx_bare**2 + ty_bare**2) * np.array([1.0, 1.0, eta_J7a**2, eta_J7a**2, eta_J7b**2, eta_J7b**2]) # single-bond ZSA superexchange: even, longitudinal scale
         # r_Q is an additive residual beyond the bare (Gutzwiller-renormalised) coupling.
-        J_B1g_scalar = n_kspace * g_J * self.J_pdct * (tx_bare**2 - ty_bare**2) * np.sqrt(eta_J7a**2 + eta_J7b**2) * (1.0 + r_Q) / 2.0  # odd, transverse scale
+        J_B1g_scalar = n_kspace * g_J * self.J_pdct * (tx_bare**2 - ty_bare**2) * np.sqrt(eta_J7a**2 + eta_J7b**2) * (1.0 + r_Q)  # odd, transverse scale
         return J_A1g_diag, J_B1g_scalar
 
     def moriya_gamma(self, doping: float, t_eff: float, J_eff: float) -> float:
@@ -1213,7 +1212,7 @@ class RMFT_Solver:
         Fm = _F_ex(Q - eps)
         return self._K_bare + (Fp - 2.0 * F0 + Fm) / eps2
 
-    def compute_K_eff_full(self, M: float, Q: float, Delta_s: complex, Delta_d: complex, n_kspace: float, mu: float, g_t: float, g_J: float, r_Q: float = 0.0, F67s_mf: float = 0.0, Q_Eg2: float = 0.0) -> float:
+    def compute_K_eff_full(self, M: float, Q: float, Delta_s: complex, Delta_d: complex, n_kspace: float, mu: float, g_t: float, g_J: float, r_Q: float = 0.0, F67s_mf: float = 0.0, Q_Eg2: float = 0.0) -> Tuple[float, float]:
         """Total (bare + exchange) stiffness via numerical 2nd derivative of F_total."""
         eps2 = _JT_FD_H2_BASE + _JT_FD_H2_QCOEF * Q**2
         eps = np.sqrt(eps2)
@@ -2706,7 +2705,7 @@ class RMFT_Solver:
             'Q_fluct':    Q_fluct,
         }
 
-    def refine_M_normal_state(self, target_doping: float, initial_M: float, max_iter: int = 12, verbose: bool = False) -> Tuple[float, float, float]:
+    def refine_M_normal_state(self, target_doping: float, initial_M: float, max_iter: int = 40, verbose: bool = False) -> Tuple[float, float, float]:
         # ---- preliminary quantities that do not depend on M ----
         g_t, g_J, _, _ = self.p.get_gutzwiller_factors(target_doping)
         t_eff = g_t * self.p.t0
@@ -2723,7 +2722,7 @@ class RMFT_Solver:
             J_eff = self.p.Z * self.p.exchange_channels(0.0, n_kspace, self.p.t0, self.p.t0, g_J)[0][0]
             Gamma_M, _, _ = self._make_vertex_params(target_doping, t_eff, t_eff, g_t, J_eff)
             chi_SS_afm, _, _ = self.get_susceptibilities_sc(M, 0.0, 0.0j, 0.0j, n_kspace, mu, g_t, g_J, np.array([np.pi, np.pi]), Gamma_M, 0.0, 0.0, (ev_n, ec_n), apply_diamagnetic_QQ=True)
-            M = float(np.clip(M + 0.35 * (float(np.tanh(J_eff * chi_SS_afm * M)) - M), 0.0, _KICK_M_CLIP_HI))
+            M = float(np.clip(M + 0.39 * (float(np.tanh(J_eff * chi_SS_afm * M)) - M), 0.0, _KICK_M_CLIP_HI))
             if verbose:
                 print(f"stoner-1 = {J_eff * chi_SS_afm - 1:.6f}, M = {M:.6f}")
         return M, n_kspace, mu
@@ -2739,7 +2738,7 @@ class RMFT_Solver:
         Regimes: λ₊<0.7 subcritical, λ₊∈[0.7,1.4] critical, λ₊>1.4 supercritical.
         """
         # The seed for the fixed-point solve is the CALLER's own initial_M when it looks like real information
-        initial_M, n_kspace, mu = self.refine_M_normal_state(target_doping, initial_M, 12, verbose)
+        initial_M, n_kspace, mu = self.refine_M_normal_state(target_doping, initial_M, 40, verbose)
 
         if force_d_wave:
             Delta_s = 0.0j
@@ -2804,36 +2803,31 @@ class RMFT_Solver:
             Q_probe = float(np.clip(_sign * _KICK_BOOST_Q * self.p.g_JT * self.p.lambda_hop * np.sqrt(abs(chi_tau_val / K_eff_ex_n)), -0.5 * self.p.lambda_hop, 0.5 * self.p.lambda_hop))
         
         # ---  Early Hessian in the seed neighborhood --- 
-        _EARLY_KICK_SCALE = 0.05
+        # Use lambda_plus (analytic Jacobi eigenvalue of the (Δ,Q) map) as the pairing-strength indicator for the seed scale
+        frac = _lin_seed['frac']
         _hk_early = self.compute_hessian(initial_M, Q_probe, Delta_s, Delta_d, n_kspace, mu, g_t, g_J, g_Delta_s, g_Delta_d, r_Q=0.0, F67s_mf=0.0, Q_Eg2=0.0, V_JT=V_JT, vertex_cache=None)
-        evals, evecs = _hk_early['eigenvalues'], _hk_early['eigenvectors']
-        idx_min = int(np.argmin(evals))
-        lambda_min = float(evals[idx_min])
-        evec_min = evecs[:, idx_min].real
+
+        # compute_hessian already returns the correctly non-dimensionalized softest direction (physical units, normalized) and its scaled eigenvalue
+        lambda_min = _hk_early['lambda_min_scaled']
 
         if lambda_min < 0.0:
-            edir = evec_min * np.array([1.0, self.p.lambda_hop, 1.0])
-            edir /= max(np.linalg.norm(edir), _MATH_EPS)
+            edir = _hk_early['physical_dir']
             if Q_probe * edir[1] < 0:
                 edir = -edir
-            step = _EARLY_KICK_SCALE * edir
+            
+            step = (_EARLY_KICK_BASE + lambda_excess) * min(1.0, abs(lambda_min)) * edir
 
-            # --- M kick ---
             M_kick = float(np.clip(initial_M + step[0], _KICK_M_CLIP_LO, _KICK_M_CLIP_HI))
             Q_kick = float(np.clip(Q_probe + step[1], -0.5 * self.p.lambda_hop, 0.5 * self.p.lambda_hop))
-
-            # --- Δ kick ---
-            # Use lambda_plus (analytic Jacobi eigenvalue of the (Δ,Q) map) as the pairing-strength indicator for the seed scale
-            frac = _lin_seed['frac']
+            
             Delta_total = abs(Delta_s) + abs(Delta_d)
-            new_Delta_total = max(Delta_total + step[2], 0.0)
-
+            new_Delta_total = complex(np.clip(lambda_excess * _t_eff * np.exp(-1.0 / max(lambda_plus, 0.1)), _DELTA_ABS_FLOOR, _KICK_DELTA_MAX_FRAC * _t_eff))
             Delta_s_kick = new_Delta_total * frac[0] * (Delta_s / abs(Delta_s) if abs(Delta_s) > _MATH_EPS else 1.0)
             Delta_d_kick = new_Delta_total * frac[1] * (Delta_d / abs(Delta_d) if abs(Delta_d) > _MATH_EPS else 1.0)
             if verbose:
+                print("unused Delta step_scale: ", step[2])
                 print("Q_probe, Q_kick: ", Q_probe, Q_kick)
                 print("initial_M, M_kick: ", initial_M, M_kick)
-                print("old_Delta_total, new_Delta_total: ", complex(np.clip(lambda_excess * _t_eff * np.exp(-1.0 / max(lambda_plus, 0.1)), _DELTA_ABS_FLOOR, _KICK_DELTA_MAX_FRAC * _t_eff)), new_Delta_total)
         else:
             reduction = _KICK_REDUCTION_AMP * max(0.0, (initial_M - _KICK_M_EXCESS_CTR)) * max(0.0, (stoner - _KICK_JCHI_EXCESS_CTR)) * lambda_excess
             M_kick = initial_M * (1.0 - reduction)
@@ -3418,13 +3412,9 @@ class RMFT_Solver:
             if Delta_total < 5.0 * self.p.tol and iteration > 3 and iteration % 8 == 0:
                 _hk = self.compute_hessian(M, Q, Delta_s, Delta_d, n_kspace, mu, g_t, g_J, g_Delta_s, g_Delta_d, _r_Q_cur, _F67s_mf, Q_Eg2, _V_JT, _vertex_cache)
                 
-                _lmin_k = float(_hk['eigenvalues'][0])
+                _lmin_k = _hk['lambda_min_scaled']
                 if np.isfinite(_lmin_k) and _lmin_k < 0:
-                    _edir = _hk['eigenvectors'][:, 0]   # eigenvector of λ_min in Hessian units (M, Q, Δ)
-
-                    # Scale to physical units (Q in Å), normalise to unit vector.
-                    _edir_raw  = _edir * np.array([1.0, self.p.lambda_hop, 1.0])
-                    _edir_raw /= max(np.linalg.norm(_edir_raw), 1e-12)
+                    _edir_raw = _hk['physical_dir']
 
                     _wM, _wQ, _wD = abs(_edir_raw[0]), abs(_edir_raw[1]), abs(_edir_raw[2])
                     _wsum = max(_wM + _wQ + _wD, 1e-12)
@@ -3700,7 +3690,7 @@ class RMFT_Solver:
             'lambda_plus': _lambda_plus,
             'regime': kick['regime'],
             'lambda_JT_sc': self.p.g_JT**2 * _chi_tau_result['chi_tau_net'] / self.compute_JT_rigidity_from_exchange(M, Q, Delta_s, Delta_d, n_kspace, mu, g_t, g_J, _r_Q_cur, _F67s_mf, Q_Eg2),
-            'K_eff_net': self.compute_K_eff_full(M, Q, Delta_s, Delta_d, n_kspace, mu, g_t, g_J, _r_Q_cur, _F67s_mf, Q_Eg2) - self.compute_K_eff_full(M, 0.0, 0.0j, 0.0j, n_kspace, mu, g_t, g_J, _r_Q_cur, _F67s_mf, Q_Eg2),
+            'K_eff_net': self.compute_K_eff_full(M, Q, Delta_s, Delta_d, n_kspace, mu, g_t, g_J, _r_Q_cur, _F67s_mf, Q_Eg2)[0] - self.compute_K_eff_full(M, 0.0, 0.0j, 0.0j, n_kspace, mu, g_t, g_J, _r_Q_cur, _F67s_mf, Q_Eg2)[0],
             'converged': converged,
             'mott_suspect': _mott_suspect,
             'scf_dynamics_regime': _scf_dynamics_regime,   # 'converging'|'limit_cycle'|'first_order_jump'|'hysteretic'
@@ -3952,11 +3942,23 @@ class RMFT_Solver:
         H[1, 2] = H[2, 1] = (F_QD_pp - F_QD_pm - F_QD_mp + F_QD_mm) / (4*eps_Q*eps_D)
 
         _evals, _evecs = np.linalg.eigh(H)
+        
+        _tx_bare_h, _ty_bare_h = self.p.effective_hopping_anisotropic(Q)
+        _t_eff_h = float(np.sqrt(0.5 * ((g_t*_tx_bare_h)**2 + (g_t*_ty_bare_h)**2)))
+        _scales_h = np.array([_KICK_M_CLIP_HI, self.p.lambda_hop, max(_t_eff_h, _MATH_EPS)])
+        _S_h = np.diag(_scales_h)
+        _evals_scaled, _evecs_scaled = np.linalg.eigh(_S_h @ H @ _S_h)
+        _idx_min_scaled = int(np.argmin(_evals_scaled))
+        _physical_dir = _scales_h * _evecs_scaled[:, _idx_min_scaled]
+        _physical_dir /= max(np.linalg.norm(_physical_dir), _MATH_EPS)
+
         return {
             'Delta_s_frac': Delta_s_frac,
             'F_bdg': F0,
             'eigenvectors': _evecs,
             'eigenvalues': _evals,
+            'physical_dir': _physical_dir,
+            'lambda_min_scaled': float(_evals_scaled[_idx_min_scaled]),
         }
 
     def compute_dF_dDelta_and_d2F(self, M: float, Q: float, Delta_s: complex, Delta_d: complex, n_kspace: float, mu: float, g_t: float, g_J: float, g_Delta_s: float, g_Delta_d: float, r_Q: float, F67s_mf: float, Q_Eg2: float, V_JT: float, vertex_cache: dict = None) -> Tuple[float, float, np.ndarray]:
@@ -4133,7 +4135,7 @@ class RMFT_Solver:
                 'ratio_2D': 0.0, 'Delta_jump': 0.0, 'hysteresis': 0.0, 'history': []
             }
 
-        def _eval_sc_basin(solver: 'RMFT_Solver', seed_M: float, seed_Q: float, seed_D: float) -> tuple:
+        def _eval_sc_basin(solver: 'RMFT_Solver', seed_M: float, seed_D: float) -> tuple:
             """Returns (Δ_eff, Q_eff, M_eff, F_sc, converged, collapsed); collapsed if Δ<Delta_tol."""
             try:
                 res = solver.solve_self_consistent(
@@ -5974,17 +5976,17 @@ if __name__ == "__main__":
     """, flush=True)
 
     params = ModelParams(
-        t_pd             = 0.550,
-        u                = 15.000,
-        lambda_soc       = 0.039,
-        Delta_tetra      = -0.080,
-        g_JT             = 0.350,
-        K_lattice        = 2.230,
+        t_pd             = 0.490,
+        u                = 11.500,
+        lambda_soc       = 0.048,
+        Delta_tetra      = -0.100,
+        g_JT             = 0.330,
+        K_lattice        = 3.000,
         lambda_hop       = 1.000,
         g_Eg2            = 0.100,
         K_lattice_Eg2    = 6.500,
-        Delta_CT         = 2.200,
-        Delta_B1g_static = 0.020,
+        Delta_CT         = 2.405,
+        Delta_B1g_static = -0.016,
         hybrid_scale     = 6.000,
         Upp_ratio_bare   = 0.400,
         Z                = 4,
@@ -5992,11 +5994,11 @@ if __name__ == "__main__":
         tol              = 1e-4,
         )
 
-    target_doping = 0.100
+    target_doping = 0.080
     doping_margin = 0.20          # scan covers target ± 20 %
     min_doping    = max(target_doping * (1.0 - doping_margin), _G_T_COHERENCE_MIN / (2.0 - _G_T_COHERENCE_MIN))
     max_doping    = target_doping * (1.0 + doping_margin)
-    initial_Delta = 9e-3
+    initial_Delta = 8e-3
 
     _scf_log("INIT",
                 f"t_pd={params.t_pd:.3f} eV  u={params.u:.3f}  λ_SOC={params.lambda_soc:.3f} eV"
