@@ -285,6 +285,7 @@ _GAP_VF_MIN           : float = 1.0e-5              # eV·(rad⁻¹): FS points 
 _GAP_NLINE            : int   = 1201                # points of the line search per FS point
 _GAP_BFS_TOL          : float = 1.0e-4              # eV: FS points with min|E| below this count as gapless (Bogoliubov Fermi surface)
 _ODD_VTX_TOL          : float = 1e-9                # relative tolerance of the p-channel (odd-parity) vertex validation
+_SWAP_DEFECT_TOL      : float = 1e-6                # |K − P K Pᵀ| / max|K| above this: the σd split is variational only, not an exact irrep decomposition (Q ≠ 0 / static B1g breaks the symmetry)
 _MAD_DENOM            : float = 1.13                # Allen–Dynes strong-coupling corrections give denom≈1.45 for λ~1 spin-fluctuation spectra; Millis–Monien–Pines quote denom≈1.13 for the SF model.
 _MAD_NUM              : float = 1.04                # exponent prefactor (weak-coupling limit, spectrum-independent)
 _GL_MIN_PTS           : int   = 2                   # minimum stable SC points required for GL fit
@@ -480,24 +481,43 @@ def _bond_weights(ff, n: int = _BOND_GRID):
     AX, AY = np.meshgrid(ax, ax, indexing='ij')
     return w / max(float(w.sum()), 1e-300), np.minimum(AX, AY), np.maximum(AX, AY)
 
-def _bond_irrep_scales(irrep_names, irrep_ff, w_cls) -> np.ndarray:
-    """Calculate the bond-based Weiss-field scaling for each irrep."""
-    scales = []
-    for name in irrep_names:
-        w, lo, hi = _bond_weights(irrep_ff[name])
-        cls = np.select(
-            [(lo == 0) & (hi == 0),
-             (lo == 0) & (hi == 1),
-             (lo == 1) & (hi == 1),
-             (lo == 0) & (hi == 2)],
-            [0, 1, 2, 3],
-            default=4,
-        )
-        scales.append(np.array([w[cls == i].sum() for i in range(5)]) @ w_cls)
-    return np.asarray(scales, dtype=float)
+def _bond_irrep_scales(irrep_names, irrep_ff, w_cls, irrep_d4h) -> np.ndarray:
+    """Bond-based Weiss-field scaling for each irrep.  For A1g / B1g channels the
+    scale is zeroed if the form factor has no B1g-weighted bond content
+    (φ̃ = Σ_δ η_δ c_δ e^{ik·δ} ≡ 0, This happens exactly when every bond in the
+    shell has δx = ±δy (diagonal bonds) or δ = 0 (on-site): on such a
+    shell there is no B1g function to build a transverse Weiss field from."""
+    n = _BOND_GRID
+    k = 2.0 * np.pi * np.arange(n) / n
+    KX, KY = np.meshgrid(k, k, indexing='ij')
+    _m = np.arange(n)
+    _m = np.where(_m > n // 2, _m - n, _m)
+    DX, DY = np.meshgrid(_m, _m, indexing='ij')
+    eta = np.sign(DX ** 2 - DY ** 2)
+    ax = np.minimum(np.arange(n), n - np.arange(n))
+    AX, AY = np.meshgrid(ax, ax, indexing='ij')
+    lo, hi = np.minimum(AX, AY), np.maximum(AX, AY)
+    cls = np.select(
+        [(lo == 0) & (hi == 0), (lo == 0) & (hi == 1),
+         (lo == 1) & (hi == 1), (lo == 0) & (hi == 2)],
+        [0, 1, 2, 3], default=4,
+    )
+    scales = np.zeros(len(irrep_names), dtype=float)
+    for i, name in enumerate(irrep_names):
+        c = np.fft.fft2(np.broadcast_to(
+            np.asarray(irrep_ff[name](KX, KY), dtype=float), KX.shape)) / n ** 2
+        w = np.abs(c) ** 2
+        w[w < 1e-20 * float(w.max())] = 0.0
+        w_norm = w / max(float(w.sum()), 1e-300)
+        s = float(np.array([w_norm[cls == t].sum() for t in range(5)]) @ w_cls)
+        if irrep_d4h is not None and irrep_d4h[name] in ('A1g', 'B1g'):
+            if float(np.sum(np.abs(eta * c) ** 2)) <= 1e-20 * max(float(w.sum()), 1e-300):
+                s = 0.0
+        scales[i] = s
+    return scales
 
 def _sector_label(key: tuple) -> str:
-    """Readable sector label: the character plus the library harmonics living in that sector ('*' marks the ones in the active BdG basis)."""
+    """Readable sector label: the character plus the library harmonics living in that sector"""
     t, mx, my = key
     names = [n + ('*' if n in _IRREP_NAMES else '') for n in _HARMONIC_LIBRARY if _LIB_CHAR[n] == key]
     return f"(TQ{'+' if t > 0 else '-'},mx{'+' if mx > 0 else '-'},my{'+' if my > 0 else '-'}) [{','.join(names[:8])}]"
@@ -1793,7 +1813,7 @@ def _sector_report_lines(vc: dict, h_c4_breaker: float, h_c4_symmetric: bool, km
     # σd (kx↔ky) resolution of the even-parity sectors: the D4h irreps that share a G-sector, one eigenvalue each
     sw_lam = vc.get('sector_swap_lambda')
     sw_def = vc.get('sector_swap_defect')
-    sw_ok = sw_lam is not None and bool(vc.get('fs_closed_swap', False))
+    sw_ok = (sw_lam is not None and bool(vc.get('fs_closed_swap', False)) and bool(np.any(np.isfinite(sw_lam))))
     if sw_ok:
         lines.append("  D4h irreps inside the even-parity sectors (σd = kx↔ky parity of the FS sample; exact irreps only if the kernel is C4-covariant, defect = max|K − P K Pᵀ|/max|K| = 0):")
         for si, key in sorted(((s, k) for s, k in enumerate(_G_OPS) if k[1] == k[2]), key=lambda it: -float(np.nanmax(sw_lam[it[0]]))):
@@ -2072,7 +2092,7 @@ class ModelParams:
         self.J3_over_J1 = self.t_dprime_ratio ** 2
         # Weight of the B1g transverse Weiss field (TRW) of every pairing channel relative to the NN-bond value J_B1g  The B1g⊗B1g exchange on a bond δ is ∝ (t_δ/t)² (the same bridge counting as J2/J1, J3/J1 above): NN 1, diagonal NNN (1,1) → (t'/t)², axial 3NN (2,0) → (t''/t)², bonds that carry no hopping in this model. The weight of a channel is the squared-amplitude average over the bond classes of its form factor.
         _w_cls = np.array([0.0, 1.0, self.J2_over_J1 * _TRW_FAR_SCALE, self.J3_over_J1 * _TRW_FAR_SCALE, 0.0])      # on-site | NN | NNN | 3NN | longer
-        self.trw_irrep_scale = _bond_irrep_scales(_IRREP_NAMES, _IRREP_FF, _w_cls)
+        self.trw_irrep_scale = _bond_irrep_scales(_IRREP_NAMES, _IRREP_FF, _w_cls, _IRREP_D4H)
         self.Z_afm_eff  = _Z * (1.0 - self.J2_over_J1 - self.J3_over_J1)  # A1g multiplier from J2/J3 frustration for the longitudinal AFM Weiss field
 
         # Ligand coordination + weak-hybridisation limit for U_pp.
@@ -2546,7 +2566,7 @@ class RMFT_Solver:
             2. Inter-sublattice hopping:  ∂H_AB/∂Q
             3. AFM Weiss:                 ∂/∂Q [Z_afm · J_A1g(Q)] · M · sz_op
             4. On-site TRW (s):           zero
-            5. NN-bond TRW (es,d,px,py):  ∂/∂Q [J_B1g(Q)] · φ_i^{w_a1g}(k) · Quad67_i · B1g_offdiag
+            5. NN-bond TRW (es,d,px,py):  ∂/∂Q [J_B1g(Q)] · φ_i^(k) · Quad67_i · B1g_offdiag
             6. NNN / 3NN TRW (g, ...):    ∂/∂Q [J_B1g^{(i)}(Q)] · φ_i(k) · Quad67_i · B1g_offdiag
 
         Hole-block parity handling:
@@ -3300,14 +3320,18 @@ class RMFT_Solver:
         # Splitting the FS sample into σd-even / σd-odd functions gives each irrep's top eigenvalue: exact for a C4-covariant kernel; `sector_swap_defect` = max|K − P K Pᵀ| / max|K| measures the deviation.
         perm_sw, closed_sw = _grid_sym_permutation(fs_pts, 'swap')
         swap_ok = bool(closed_sw and float(np.max(np.abs(fs_weights - fs_weights[perm_sw]))) <= _ODD_VTX_TOL * max(float(np.max(fs_weights)), 1e-300))
-        sector_swap_lam    = np.full((n_ops, 2), np.nan)          # [:, 0] σd-even, [:, 1] σd-odd;  NaN for mx ≠ my (σd maps such a sector onto its px ↔ py partner, whose λ must coincide in a C4-covariant kernel)
+        sector_swap_lam    = np.full((n_ops, 2), np.nan)          # [:, 0] σd-even, [:, 1] σd-odd;  NaN for mx ≠ my OR for a sector whose kernel is not σd-covariant
         sector_swap_defect = np.full(n_ops, np.nan)
         if swap_ok:
             for si, key in enumerate(_G_OPS):
                 if key[1] != key[2]:
                     continue
                 K_s = sqrt_w[:, None] * V_sec[si] * sqrt_w[None, :]
-                sector_swap_lam[si, 0], sector_swap_lam[si, 1], sector_swap_defect[si] = _swap_resolved_top(K_s, perm_sw)
+                # The σd split is an exact irrep decomposition only if the kernel commutes with σd.  Q ≠ 0 or Δ_B1g_static ≠ 0 breaks C4 ⇒ the kernel picks up a C4-breaking part
+                lam_e, lam_o, defect = _swap_resolved_top(K_s, perm_sw)
+                sector_swap_defect[si] = defect
+                if defect <= _SWAP_DEFECT_TOL:
+                    sector_swap_lam[si, 0], sector_swap_lam[si, 1] = lam_e, lam_o
 
         # --- FS-closure check for the odd-parity channels ---
         # Kernel-level D2h selection rules follow from G-character orthogonality. The only additional requirement is an inversion-closed FS sample with inversion-symmetric weights, ensuring well-defined projections of the odd-parity (px, py, px2, py2) form factors onto V_sec[χ].
@@ -6192,15 +6216,15 @@ class VectorizedBdG:
 
         Transverse (anomalous) Weiss fields (H_TRW):
         • On-site (s)             → no TRW — φ_s ≡ 1 is σd-even and has no bond-matched σd partner; the s contribution would not be σd-covariant.
-        • NN-bond (es, d, px, py) → φ_i^{w_a1g}(k) · J_B1g(Q) · Quad67_i · B1g_offdiag     (φ^{w_a1g}: own form factor for w_a1g = 1, σd partner for w_a1g = 0)
+        • NN-bond (es, d, px, py) → φ_i^(k) · J_B1g(Q) · Quad67_i · B1g_offdiag
         • NNN / 3NN (g, es2, d2, px2, py2, ...) → φ_i(k) · J_B1g^{(i)}(Q) · Quad67_i · B1g_offdiag
         The NNN amplitude is small (κ_nnn ≈ (t'/t)²·κ_NN) but not symmetry-forbidden: the relative sign on the two sublattices is fixed by the same Θ·τ_AB rule as the on-site
         term (A gets −, B gets + for a uniform sign convention).  φ_i(k)·Quad67_i·B1g_offdiag IS D2h-mirror covariant once φ_i is chosen with the correct σd character
 
         Fermion antisymmetry, Δ_ij(k) = -Δ_ji(-k)
         ------------------------------------------
-        An EVEN-in-k pairing form factor (s, es, d, g; φ(-k)=+φ(k)) is combined with an ANTIsymmetric (site+orbital+spin) index structure. An ODD-in-k form factor (px, py, px2, py2; φ(-k)=-φ(k))
-         instead uses a SYMMETRIC index structure (identical value at [i,j] and [j,i]), added as a separate contribution (Delta_full_odd) — never antisymmetrised.
+        An EVEN-in-k pairing form factor (s, es, d, g; φ(-k)=+φ(k)) is combined with an ANTIsymmetric (site+orbital+spin) index structure. An ODD-in-k form factor
+        (px, py, px2, py2; φ(-k)=-φ(k)) instead uses a SYMMETRIC index structure (identical value at [i,j] and [j,i]), added as a separate contribution — never antisymmetrised.
 
         Hole-block convention (k → −k):
         The hole blocks are −H_part(−k)^*.  Since even parts satisfy f(−k)=f(k) and odd parts satisfy f(−k)=−f(k), the ODD contributions enter the hole block with the
@@ -6836,7 +6860,7 @@ if __name__ == "__main__":
         t_prime_ratio    = -0.190,
         t_dprime_ratio   = 0.060,
         U_dd             = 2.300,
-        lambda_soc       = 0.022,
+        lambda_soc       = 0.021,
         Delta_tetra      = -0.022,
         g_JT             = 0.170,
         K_lattice        = 3.000,
