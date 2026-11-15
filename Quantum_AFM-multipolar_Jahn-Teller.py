@@ -115,6 +115,7 @@ _HARMONIC_LIBRARY = {
     'py9': ('Eu',  'nnn_axis', -1, lambda kx, ky: np.sin(4.0 * ky),                                                1.0),
     'pyA': ('Eu',  'nnn_diag', -1, lambda kx, ky: np.cos(2.0 * kx) * np.sin(2.0 * ky),                             1.0),
     'pyB': ('Eu',  'nnn_diag', -1, lambda kx, ky: np.cos(3.0 * kx) * np.sin(ky),                                   1.0),
+    'pyC': ('Eu',  'nnn_axis', -1, lambda kx, ky: np.sin(6.0 * ky),                                                1.0),
 
     # ── Γ₄ = (-, +, -) : D4h Eu (y-partner, T_Q-odd) ──────────────────────────
     'py':  ('Eu',  'nn_AB',    -1, lambda kx, ky: np.sin(ky),                                                      1.0),
@@ -137,8 +138,13 @@ _HARMONIC_LIBRARY = {
     'gA2': ('A2g', 'nn_AB',    +1, lambda kx, ky: np.sin(kx) * np.sin(ky) * (np.cos(kx) - np.cos(ky)),             1.0),
     'gA3': ('A2g', 'nn_AB',    +1, lambda kx, ky: np.sin(kx) * np.sin(ky) * (np.cos(3.0 * kx) - np.cos(3.0 * ky)), 1.0),
     'gA4': ('A2g', 'nn_AB',    +1, lambda kx, ky: np.sin(kx) * np.sin(ky) * (np.cos(5.0 * kx) - np.cos(5.0 * ky)), 1.0),
+    'gA5': ('A2g', 'nn_AB',    +1, lambda kx, ky: np.sin(kx) * np.sin(ky) * (np.cos(7.0 * kx) - np.cos(7.0 * ky)), 1.0),
+    'gA6': ('A2g', 'nn_AB',    +1, lambda kx, ky: np.sin(kx) * np.sin(ky) * (np.cos(9.0 * kx) - np.cos(9.0 * ky)), 1.0),
     'gB2': ('B2g', 'nn_AB',    +1, lambda kx, ky: np.sin(kx) * np.sin(ky) * (np.cos(kx) + np.cos(ky)),             1.0),
     'gB3': ('B2g', 'nn_AB',    +1, lambda kx, ky: np.sin(kx) * np.sin(ky) * (np.cos(3.0 * kx) + np.cos(3.0 * ky)), 1.0),
+    'gB4': ('B2g', 'nn_AB',    +1, lambda kx, ky: np.sin(kx) * np.sin(ky) * (np.cos(5.0 * kx) + np.cos(5.0 * ky)), 1.0),
+    'gB5': ('B2g', 'nn_AB',    +1, lambda kx, ky: np.sin(kx) * np.sin(ky) * (np.cos(7.0 * kx) + np.cos(7.0 * ky)), 1.0),
+    'gB6': ('B2g', 'nn_AB',    +1, lambda kx, ky: np.sin(kx) * np.sin(ky) * (np.cos(9.0 * kx) + np.cos(9.0 * ky)), 1.0),
 
     # ── Γ₇ = (+, -, +) : D4h Eu (x-partner, T_Q-even) ─────────────────────────
     'px2': ('Eu',  'nnn_axis', -1, lambda kx, ky: np.sin(2.0 * kx),                                                1.0),
@@ -146,6 +152,7 @@ _HARMONIC_LIBRARY = {
     'px9': ('Eu',  'nnn_axis', -1, lambda kx, ky: np.sin(4.0 * kx),                                                1.0),
     'pxA': ('Eu',  'nnn_diag', -1, lambda kx, ky: np.sin(2.0 * kx) * np.cos(2.0 * ky),                             1.0),
     'pxB': ('Eu',  'nnn_diag', -1, lambda kx, ky: np.sin(kx) * np.cos(3.0 * ky),                                   1.0),
+    'pxC': ('Eu',  'nnn_axis', -1, lambda kx, ky: np.sin(6.0 * kx),                                                1.0),
 
     # ── Γ₈ = (-, -, +) : D4h Eu (x-partner, T_Q-odd) ──────────────────────────
     'px':  ('Eu',  'nn_AB',    -1, lambda kx, ky: np.sin(kx),                                                      1.0),
@@ -219,7 +226,7 @@ _N_CLUSTER            : int   = _N_ORB ** _CLUSTER_SIZE
 
 # ── Real-space bond content of a pairing form factor φ(k) = Σ_δ c_δ e^{i k·δ} (registry-driven; weights the transverse Weiss field TRW of every channel and validates the declared bond kind) ──────────
 _Z                    : int   = 4                                                      # metal's coordination number in 2D square lattice
-_BOND_GRID            : int   = 16                                                     # exact for bonds with |δ_x|, |δ_y| < 8 (the library reaches 5)
+_BOND_GRID            : int   = 32                                                     # exact for bonds with |δ_x|, |δ_y| < 16 (Nyquist ≥ the library's max harmonic order 11 + margin); FFT import-time only
 _SIGN_M = (+1.0, -1.0, +1.0, -1.0)
 _BONDS  = ((0, 1, +1.0), (1, 2, -1.0), (2, 3, +1.0), (3, 0, -1.0))
 _Z_EFF   = _Z - 2.0 * len(_BONDS) / _CLUSTER_SIZE                                      # intra-cluster NN bonds per site (2 for the 2x2 plaquette) must be subtracted to get external NN neighbours per site
@@ -291,7 +298,6 @@ _MAD_NUM              : float = 1.04                # exponent prefactor (weak-c
 _GL_MIN_PTS           : int   = 2                   # minimum stable SC points required for GL fit
 _GL_MAX_PTS           : int   = 4                   # upper window of recent stable points used in GL regression
 _GL_DELTA_MIN         : float = 2e-3                # |Δ| floor for GL fit points (below this: numerically unreliable)
-_GL_TC_MARGIN         : float = 0.05                # max relative deviation |Tc_GL−T_spinodal|/T_max to accept GL result
 _GL_SPINODAL_JUMP     : float = 0.15                # Δ_spinodal/Δ_0 below this → GL extrapolation reliable
 _THRESHOLD_RATIO      : float = 0.02                # 2% difference threshold for first-order classification
 _TC_LIN_DELTA_EPS     : float = 2.0e-5              # FD step for ∂anom_correlator/∂Δ at Δ=0 (anom_correlator is ODD in Δ (anomalous amplitude ∝ Δ), so the truncation error is (eps/ξ_eff)² with ξ_eff = min(kT, t_eff)
@@ -470,23 +476,15 @@ def _scf_log(tag: str, msg: str, verbose: bool = True) -> None:
     with _log_lock:
         print(f"[{tag:<18s}] {msg}", flush=True)
 
-def _bond_weights(ff, n: int = _BOND_GRID):
-    """(w, lo, hi): normalised squared amplitudes |c_δ|² of the bond expansion of the form factor `ff` on an n×n periodic grid, and min/max(|δ_x|, |δ_y|) of every bond."""
-    k = 2.0 * np.pi * np.arange(n) / n
-    KX, KY = np.meshgrid(k, k, indexing='ij')
-    c = np.fft.fft2(np.broadcast_to(np.asarray(ff(KX, KY), dtype=float), KX.shape)) / n ** 2
-    w = np.abs(c) ** 2
-    w[w < 1e-20 * float(w.max())] = 0.0                              # FFT round-off (~1e-31) -> exact zero: bonds that are absent from the form factor carry exactly no weight
-    ax = np.minimum(np.arange(n), n - np.arange(n))
-    AX, AY = np.meshgrid(ax, ax, indexing='ij')
-    return w / max(float(w.sum()), 1e-300), np.minimum(AX, AY), np.maximum(AX, AY)
-
 def _bond_irrep_scales(irrep_names, irrep_ff, w_cls, irrep_d4h) -> np.ndarray:
-    """Bond-based Weiss-field scaling for each irrep.  For A1g / B1g channels the
-    scale is zeroed if the form factor has no B1g-weighted bond content
-    (φ̃ = Σ_δ η_δ c_δ e^{ik·δ} ≡ 0, This happens exactly when every bond in the
-    shell has δx = ±δy (diagonal bonds) or δ = 0 (on-site): on such a
-    shell there is no B1g function to build a transverse Weiss field from."""
+    """Bond-class weighted Weiss-field scale per irrep, Σ_class w_class·(t_class/t)².
+
+    A1g / B1g scale is set to 0 when either
+      (a) φ̃ = Σ_δ η_δ c_δ e^{ik·δ} ≡ 0 (only diagonal / on-site bonds: no B1g function
+          on that shell, e.g. cc, cc2, cc3, cc4, s), or
+      (b) the channel has no σd partner in _PARTNER_PAIRS, so the actual TRW
+          block built from it is 0 and a non-zero scale would be inconsistent.
+    Weights are normalised to Σ|c_δ|² = 1, so an NN-only channel has scale 1."""
     n = _BOND_GRID
     k = 2.0 * np.pi * np.arange(n) / n
     KX, KY = np.meshgrid(k, k, indexing='ij')
@@ -511,8 +509,12 @@ def _bond_irrep_scales(irrep_names, irrep_ff, w_cls, irrep_d4h) -> np.ndarray:
         w_norm = w / max(float(w.sum()), 1e-300)
         s = float(np.array([w_norm[cls == t].sum() for t in range(5)]) @ w_cls)
         if irrep_d4h is not None and irrep_d4h[name] in ('A1g', 'B1g'):
-            if float(np.sum(np.abs(eta * c) ** 2)) <= 1e-20 * max(float(w.sum()), 1e-300):
+            has_b1g_support = float(np.sum(np.abs(eta * c) ** 2)) > 1e-20 * max(float(w.sum()), 1e-300)
+            has_partner = name in _PARTNER_PAIRS
+            if not (has_b1g_support and has_partner):
                 s = 0.0
+        elif irrep_d4h is not None and irrep_d4h[name] in ('B2g', 'A2g'):
+            s = 0.0
         scales[i] = s
     return scales
 
@@ -588,14 +590,16 @@ def _get_nambu_spinors(ec: np.ndarray):
     return ec[:, 0:_N_ORB, :], ec[:, _N_ORB:2*_N_ORB, :], ec[:, 2*_N_ORB:3*_N_ORB, :], ec[:, 3*_N_ORB:_N_BDG, :]
 
 def _trw_form_factor(name: str, i_irr: int, Phi_k: np.ndarray) -> np.ndarray:
-    """
-    The TRW term Quad67_i·φ_i(k)·B1g_offdiag is C4-covariant when φ_i(k) carries the σd character of the state that produced Quad67_i; this selects between the own form factor and its σd partner accordingly.
-    Returns the σd-partner of φ_i(k) when the channel has an entry in _PARTNER_PAIRS. Used only on the term side of the TRW.
-    """
-    if _is_onsite(name) or _IRREP_D4H[name] not in ('A1g', 'B1g') or name not in _PARTNER_PAIRS:
-        return Phi_k[:, i_irr]
-    else:
-        return Phi_k[:, _IRREP_NAMES.index(_PARTNER_PAIRS[name])]
+    """Form factor of the TRW operator Quad67_i · φ̃_i(k) · B1g_offdiag (term side only).
+
+    A1g / B1g with a partner in _PARTNER_PAIRS → the σd partner (the J_B1g(Q) oddness must be compensated by the opposite σd parity of φ̃).
+    A1g / B1g without a partner → 0: no matching term in _trw_dc_energy, and no B1g channel to soften on that bond shell.
+    B2g / A2g / Eu → own form factor (covariant by construction)."""
+    if _IRREP_D4H[name] in ('A1g', 'B1g'):
+        if name in _PARTNER_PAIRS:
+            return Phi_k[:, _IRREP_NAMES.index(_PARTNER_PAIRS[name])]
+        return np.zeros_like(Phi_k[:, i_irr])
+    return Phi_k[:, i_irr]
 
 def _compute_pair_correlator(k_weights: np.ndarray, Phi_irrep_k: np.ndarray, ev: np.ndarray, ec: np.ndarray, kT: float, Delta_vec: np.ndarray, g_Delta_s: float, g_Delta_ad: float, g_Delta_bd: float) -> np.ndarray:
     """
@@ -1816,7 +1820,7 @@ def _sector_report_lines(vc: dict, h_c4_breaker: float, h_c4_symmetric: bool, km
     sw_ok = (sw_lam is not None and bool(vc.get('fs_closed_swap', False)) and bool(np.any(np.isfinite(sw_lam))))
     if sw_ok:
         lines.append("  D4h irreps inside the even-parity sectors (σd = kx↔ky parity of the FS sample; exact irreps only if the kernel is C4-covariant, defect = max|K − P K Pᵀ|/max|K| = 0):")
-        for si, key in sorted(((s, k) for s, k in enumerate(_G_OPS) if k[1] == k[2]), key=lambda it: -float(np.nanmax(sw_lam[it[0]]))):
+        for si, key in sorted(((s, k) for s, k in enumerate(_G_OPS) if k[1] == k[2]), key=lambda it: -float(np.nanmax(sw_lam[it[0]])) if np.any(np.isfinite(sw_lam[it[0]])) else float('inf')):
             parts = []
             for ip, par_sw in enumerate((1, -1)):
                 members = [_IRREP_NAMES[i] for i in _SECTOR_MEMBERS[key] if _IRREP_SWAP[_IRREP_NAMES[i]] == par_sw]
@@ -1842,7 +1846,7 @@ def _sector_report_lines(vc: dict, h_c4_breaker: float, h_c4_symmetric: bool, km
         _lead_cov_lam = max((float(vc['sector_lambda'][si]) for si, key in enumerate(_G_OPS) if _SECTOR_MEMBERS[key] and (vc.get('sector_drives') is None or bool(vc['sector_drives'][si]))), default=0.0)
         _unseeded = []
         for si, key in enumerate(_G_OPS):
-            if key[1] != key[2] or not _SECTOR_MEMBERS[key] or (vc.get('sector_drives') is not None and not bool(vc['sector_drives'][si])):
+            if key[1] != key[2] or not _SECTOR_MEMBERS[key] or (vc.get('sector_drives') is not None and not bool(vc['sector_drives'][si])) or not np.any(np.isfinite(sw_lam[si])):
                 continue
             _ip_top = int(np.nanargmax(sw_lam[si]))
             _ip_oth = 1 - _ip_top
@@ -1884,10 +1888,15 @@ def _sector_report_lines(vc: dict, h_c4_breaker: float, h_c4_symmetric: bool, km
             lines.append(
                 f"  ⚠ leading sector {lead_all['label']} (λ={lead_all['lam']:+.4f} > {lead_cov['lam']:+.4f}) is an ODD-k sector excluded from selection / seeds / Tc"
             )
-    if lead_cov and lead_cov['resolved_active'] < 0.5 and lead_cov['suggest']:
-        lines.append(
-            f"  ⚠ only {lead_cov['resolved_active']:.0%} of the covered leading eigenvector is spanned by the active basis; candidates: {lead_cov['suggest']}"
-        )
+    if lead_cov and lead_cov['resolved_active'] < 0.5:
+        if lead_cov['suggest']:
+            lines.append(
+                f"  ⚠ only {lead_cov['resolved_active']:.0%} of the covered leading eigenvector is spanned by the active basis; candidates: {lead_cov['suggest']}"
+            )
+        else:
+            lines.append(
+                f"  ⚠ only {lead_cov['resolved_active']:.0%} of the covered leading eigenvector is spanned by the active basis, and NO further library harmonic is available in this sector"
+            )
     return lines
 
 def _basis(d):
@@ -2642,7 +2651,7 @@ class RMFT_Solver:
             Quad67a_bond = _s_trw * Quad67[_IDX_7A_ARR[i_irr]]
             Quad67b_bond = _s_trw * Quad67[_IDX_7B_ARR[i_irr]]
             trw_dQ_bond = self.B1g_offdiag * _trw_weight(Quad67a_bond * dJ_7a_dQ, Quad67b_bond * dJ_7b_dQ)
-            # form factor with the C4 character of Quad67_rel,i (same rule as in _build_H_stack)
+            # σd-partner form factor for A1g/B1g channels, own form factor otherwise (same rule as in _build_H_stack)
             _c = _trw_form_factor(_name, i_irr, self.Phi_irrep_k)[:, None, None] * trw_dQ_bond[None, :, :]
             if _IRREP_PARITY[_name] > 0:
                 dH_TRW_AB_even += _c
@@ -3703,7 +3712,7 @@ class RMFT_Solver:
             _a_trw = _PARTNER_PAIRS.get(a, a)
             ia_trw = _IRREP_NAMES.index(_a_trw)
             for idxs, c in ((_IDX_7A_ARR, 0), (_IDX_7B_ARR, 1)):
-                e -= 2.0 * self.p.trw_irrep_scale[ia_trw] * J_B[c] * np.real(np.conj(Quad67[idxs[ia]]) * Quad67[idxs[ib]])
+                e -= 2.0 * self.p.trw_irrep_scale[ia_trw] * J_B[c] * np.real(Quad67[idxs[ia]] * Quad67[idxs[ib]])
         return e
 
     def _compute_bdg_free_energy(self, M_channels: np.ndarray, Q: float, Delta_vec: np.ndarray, Quad67: np.ndarray, mu: float, g_t: float, g_J: float, g_Delta_s: float, g_Delta_ad: float, g_Delta_bd: float, V_JT_corr: float, Q_Eg2: float = 0.0, K_eff_for_free_energy: float = 0.0, K_eff_Eg2_for_free_energy: float = 0.0, vertex_cache: dict = None, return_cond: bool = False):
@@ -3852,7 +3861,7 @@ class RMFT_Solver:
 
     def _bulk_F_and_K(self, target_doping: float, M_channels: np.ndarray, Q: float, Delta_vec: np.ndarray, Quad67: np.ndarray, mu: float, g_t: float, g_J: float, V_JT_corr: float, Q_Eg2: float, vertex_cache: Optional[dict]) -> Tuple[float, float, float, float]:
         """
-        Bulk side of the Q stiffness at ONE point; every probe re-solves μ at fixed density and re-evaluates Quad67 from the probed BdG state (the Q profile keeps Quad67 frozen at the SCF iterate).
+        Bulk side of the Q stiffness at ONE point; every probe re-solves μ at fixed density; Quad67 stays FROZEN at the SCF iterate in all probes; the force / profile minimum is unaffected to first order because F is stationary in Quad67 by the _trw_dc_energy cross term).
         Returns (F_can, K_bulk, K_econd, K_schur): K_bulk, K_econd = d²F_can/dQ², d²E_cond/dQ² (5-point stencil); K_schur = (∂²F/∂Q∂|Δ|)² / (∂²F/∂|Δ|²) along the CURRENT Δ direction
         (2D (Q, |Δ|) Hessian, capped at |_K_bare|; 0 without a condensate or when F is not convex in |Δ|).
         """
@@ -4454,8 +4463,8 @@ class RMFT_Solver:
                     _mir_txt  = ('n/a' if not np.isfinite(_qslave_info['F_mirror']) else f"{_qslave_info['F_mirror']*1e3:+.4f} meV")
                     _noise_ratio = (abs(_qslave_info['F_mirror']) / max(_qslave_info['dF_window_ueV'] * 1e-6, 1e-12)
                                     if np.isfinite(_qslave_info['F_mirror']) and _qslave_info['dF_window_ueV'] > 1e-6 else float('nan'))
-                    _noise_flag = ('⚠ ±Q branches degenerate (<10% of window depth): sign of Q* is set by noise/cache drift' if np.isfinite(_noise_ratio) and _noise_ratio < 0.1
-                                else '✓ ±Q branches resolved (splitting > window depth)' if np.isfinite(_noise_ratio) and _noise_ratio > 1.0
+                    _noise_flag = ('≈ ±Q branches degenerate (<10% of window depth): Z2-symmetric profile, the sign of Q* is spontaneous (set by the seed); only Re(Δ_es Δ_d*) ≠ 0 lifts it' if np.isfinite(_noise_ratio) and _noise_ratio < 0.1
+                                else '✓ ±Q branches split (> window depth): linear γ·Q·Re(Δ_es Δ_d*) coupling, or a Δ/Quad67/cache asymmetry' if np.isfinite(_noise_ratio) and _noise_ratio > 1.0
                                 else '~ mixed')
                     _scf_log("Q-SLAVE",
                         f"  Q_in={Q:+.5f} → Q_out={_Q_out_raw:+.5f} → Q_next={Q_mixed:+.5f} Å  win=±{0.5 * (_qslave_info['hi_w'] - _qslave_info['lo_w']):.4f}  ΔF_win={_qslave_info['dF_window_ueV']:.1f}  μeV"
@@ -4600,7 +4609,7 @@ class RMFT_Solver:
                 else:
                     _stagnation_count   = 0
                     _alpha_freeze_count = max(_alpha_freeze_count - 1, 0)
-                    if float(np.sum(np.abs(Delta_vec_mixed)) / self.p.Delta_CF) * abs(_Quad67[0]) > _JT_ACT_THR:
+                    if float(np.sum(np.abs(Delta_vec_mixed)) / self.p.Delta_CF) * max(abs(_Quad67)) > _JT_ACT_THR:
                         if abs(Q) < 1e-4:
                             _alpha = _alpha_base * _SCF_ALPHA_DECAY
                         else:
@@ -6332,7 +6341,7 @@ class VectorizedBdG:
             TRW_weight_bond[0:2, 4:6] = Quad67b_bond * J_B1g_scalar[1]
             TRW_weight_bond[4:6, 0:2] = np.conj(Quad67b_bond) * J_B1g_scalar[1]
             Quad67_bond_inter_matrix = solver.B1g_offdiag * TRW_weight_bond
-            # form factor with the C4 character of Quad67_rel,i: own form factor for an A1g reference, σd partner (Σ_δ η_δ c_δ e^{ik·δ}) for a B1g reference
+            # σd-partner form factor (Σ_δ η_δ c_δ e^{ik·δ}) for A1g/B1g channels, own form factor otherwise
             contribution = _trw_form_factor(_name, i_irr, Phi_irrep_k_here)[:, None, None] * Quad67_bond_inter_matrix[None, :, :]
             if _IRREP_PARITY[_name] > 0:
                 H_TRW_AB_even += contribution
@@ -6857,10 +6866,10 @@ if __name__ == "__main__":
 
     params = ModelParams(
         t_pd             = 0.480,
-        t_prime_ratio    = -0.190,
+        t_prime_ratio    = -0.195,
         t_dprime_ratio   = 0.060,
-        U_dd             = 2.300,
-        lambda_soc       = 0.021,
+        U_dd             = 2.800,
+        lambda_soc       = 0.022,
         Delta_tetra      = -0.022,
         g_JT             = 0.170,
         K_lattice        = 3.000,
@@ -6877,7 +6886,7 @@ if __name__ == "__main__":
         tol              = 1e-4,
         )
 
-    target_doping = 0.142
+    target_doping = 0.141
     doping_margin = 0.20          # scan covers target ± 20 %
     min_doping    = max(target_doping * (1.0 - doping_margin), _G_T_COHERENCE_MIN / (2.0 - _G_T_COHERENCE_MIN))
     max_doping    = target_doping * (1.0 + doping_margin)

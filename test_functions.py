@@ -863,7 +863,7 @@ def test_simulated_sc_state_diagnostic(solver, target_doping: float, M_sc: np.nd
          f"({'SOFTENS' if chi_tau_excess_signed > 0 else 'STIFFENS'})")
     _log(f"      χ_τ,net = min(w_sc,w_n)·max(δχ_τ,0) = {chi_tau_net:+.5f} eV⁻¹")
     _log(f"      λ_JT_sc = g²χ_τ,net / K_eff_reg = {lambda_JT_sc:+.6f}  "
-         f"{'PASS >0.05' if lambda_JT_sc > 0.05 else 'FAIL <0.05'}")
+         f"{'✓ >0.05' if lambda_JT_sc > 0.05 else '✗ <0.05'}")
     _log()
 
     # ── [5] Decomposition: Δ/F67 vs M-rearrangement ──────────────────
@@ -6123,8 +6123,8 @@ def test_new_channel_irrep_content(solver) -> None:
 
 
 def _bond_class_fractions(ff) -> np.ndarray:
-    """Squared-amplitude fractions of a form factor on the bond classes: 'onsite', 'NN (1,0)', 'NNN (1,1)', '3NN (2,0)', 'longer' (re-derived from qm._bond_weights; the model keeps only the resulting trw_irrep_scale)."""
-    w, lo, hi = qm._bond_weights(ff)
+    """Squared-amplitude fractions of a form factor on the bond classes: 'onsite', 'NN (1,0)', 'NNN (1,1)', '3NN (2,0)', 'longer'"""
+    w, lo, hi = _bond_weights(ff)
     cls = np.full(w.shape, 4)
     cls[(lo == 0) & (hi == 0)] = 0
     cls[(lo == 0) & (hi == 1)] = 1
@@ -6359,8 +6359,22 @@ def test_trw_symmetry(solver,
             _log(f"  {c.name:8s} {fr[0]:5.2f} {fr[1]:5.2f} {fr[2]:5.2f} "
                  f"{fr[3]:5.2f} {fr[4]:5.2f} {sc:>+9.4f}")
     _w_cls = np.array([0.0, 1.0, (p.t_prime_ratio) ** 2, (p.t_dprime_ratio) ** 2, 0.0])
-    _scale_bad = [c.name for i, c in enumerate(qm._PAIR_CHANNELS) if abs(float(_bond_class_fractions(qm._IRREP_FF[c.name]) @ _w_cls) - float(p.trw_irrep_scale[i])) > 1e-9 and float(p.trw_irrep_scale[i]) > 0.0]
-    _log(f"  trw_irrep_scale == Σ_class fraction·(t_class/t)² (NN: 1, NNN: (t'/t)², 3NN: (t''/t)², onsite / longer: 0): {'✓' if not _scale_bad else '✗ differs for ' + str(_scale_bad)}")
+    _kx_s, _ky_s = np.random.default_rng(11).uniform(-np.pi, np.pi, (2, 16))
+    def _expected_scale(c) -> float:
+        """Σ_class fraction·(t_class/t)² for the channels that can carry a σd-covariant TRW, 0 for the rest:
+        A1g / B1g only with a declared σd partner (qm._PARTNER_PAIRS) on a shell that HAS a B1g function (Σ_δ η_δ c_δ e^{ik·δ} ≢ 0: not diagonal bonds, not on-site); Eu keeps its own form factor
+        (covariance audited by test_trw_b1g_weighting); A2g / B2g have no same-shell partner of the B1g-flipped parity, so no covariant TRW exists."""
+        frac = float(_bond_class_fractions(qm._IRREP_FF[c.name]) @ _w_cls)
+        if frac <= 0.0:
+            return 0.0                                  # (long-range harmonics: no bond-sum needed, and the reference grid would alias them)
+        if c.d4h in ('A2g', 'B2g'):
+            return 0.0
+        if c.d4h in ('A1g', 'B1g'):
+            if c.name not in dict(getattr(qm, '_PARTNER_PAIRS', {})) or float(np.linalg.norm(_b1g_weighted_ff(qm._IRREP_FF[c.name], _kx_s, _ky_s))) < 1e-12:
+                return 0.0
+        return frac
+    _scale_bad = [c.name for i, c in enumerate(qm._PAIR_CHANNELS) if abs(_expected_scale(c) - float(p.trw_irrep_scale[i])) > 1e-9]
+    _log(f"  trw_irrep_scale == Σ_class fraction·(t_class/t)² (NN: 1, NNN: (t'/t)², 3NN: (t''/t)², onsite / longer: 0), and 0 where no σd-covariant TRW exists (cc, on-site, A2g / B2g): {'✓' if not _scale_bad else '✗ differs for ' + str(_scale_bad)}")
     n_zero_scale = sum(1 for i in range(len(qm._PAIR_CHANNELS))
                        if float(p.trw_irrep_scale[i]) < 1e-12)
     _log(f"  zero-scale channels: {n_zero_scale}")
@@ -7393,12 +7407,23 @@ def _c4_breakers(solver, Q: float):
     symmetric = bool(abs(pp.Delta_B1g_static) <= qm._SYM_THRESH and abs(float(Q)) <= qm._SYM_THRESH)
     return breaker, symmetric
 
+def _bond_weights(ff):
+    """(w, lo, hi): normalised squared amplitudes |c_δ|² of the bond expansion of the form factor `ff` on an n×n periodic grid, and min/max(|δ_x|, |δ_y|) of every bond."""
+    k = 2.0 * np.pi * np.arange(qm._BOND_GRID) / qm._BOND_GRID
+    KX, KY = np.meshgrid(k, k, indexing='ij')
+    c = np.fft.fft2(np.broadcast_to(np.asarray(ff(KX, KY), dtype=float), KX.shape)) / qm._BOND_GRID ** 2
+    w = np.abs(c) ** 2
+    w[w < 1e-20 * float(w.max())] = 0.0                              # FFT round-off (~1e-31) -> exact zero: bonds that are absent from the form factor carry exactly no weight
+    ax = np.minimum(np.arange(qm._BOND_GRID), qm._BOND_GRID - np.arange(qm._BOND_GRID))
+    AX, AY = np.meshgrid(ax, ax, indexing='ij')
+    return w / max(float(w.sum()), 1e-300), np.minimum(AX, AY), np.maximum(AX, AY)
+
 def _check_bond_content() -> None:
     """Import-time check of the declared bond KIND of every library harmonic against the real-space support of its form factor: 'onsite' = a constant; 'nn_AB' = bonds of odd sublattice distance only (A–B);
     'nnn_diag' / 'nnn_axis' = bonds of even sublattice distance only and no on-site term, 'nnn_axis' additionally purely axial ((n,0)-type).  Only failures and one summary line are reported."""
     n_bad = 0
     for n, v in qm._HARMONIC_LIBRARY.items():
-        w, lo, hi = qm._bond_weights(v[3])
+        w, lo, hi = _bond_weights(v[3])
         f_on = float(w[(lo == 0) & (hi == 0)].sum())
         f_odd = float(w[((lo + hi) % 2) == 1].sum())               # weight on odd sublattice distance (A–B bonds)
         f_ax = float(w[lo == 0].sum())
@@ -7410,6 +7435,22 @@ def _check_bond_content() -> None:
             n_bad += 1
             _log(f"  ❌ FAIL — library harmonic '{n}': kind '{kind}' disagrees with the real-space bond content of its form factor (on-site {f_on:.3g}, odd-distance {f_odd:.3g}, axial {f_ax:.3g})")
     _log(f"  bond content: the declared kind of all {len(qm._HARMONIC_LIBRARY)} library harmonics agrees with the real-space support of their form factors   {'✓ PASS' if not n_bad else '❌ FAIL'}")
+    # the bond-content analysis runs on an n × n grid (qm._BOND_GRID): bonds with |δ| ≥ n/2 alias onto shorter ones (cos 11k looks like a (5,0) bond on n = 16); the class / parity conclusions above
+    # stay right only if the aliased bond keeps its class and parity, so list the harmonics that alias instead of silently validating the aliased bond
+    n_g = int(qm._BOND_GRID)
+    n_f = 4 * n_g
+    k1 = 2.0 * np.pi * np.arange(n_f) / n_f
+    KXf, KYf = np.meshgrid(k1, k1, indexing='ij')
+    sm = np.where(np.arange(n_f) > n_f // 2, np.arange(n_f) - n_f, np.arange(n_f))
+    aliased = []
+    for n, v in qm._HARMONIC_LIBRARY.items():
+        c = np.fft.fft2(np.asarray(v[3](KXf, KYf), dtype=float)) / n_f ** 2
+        ia, ib = np.nonzero(np.abs(c) > 1e-12)
+        dmax = int(max(np.abs(sm[ia]).max(), np.abs(sm[ib]).max()))
+        if dmax >= n_g // 2:
+            aliased.append(f"{n} (|δ| = {dmax})")
+    if aliased:
+        _log(f"  ✗ {len(aliased)} harmonics have bonds with |δ| ≥ _BOND_GRID/2 = {n_g // 2}, which alias on the {n_g}×{n_g} bond grid (class and parity of the aliased bond are what is validated above): " + ", ".join(aliased))
 
 def _check_sk_hopping() -> None:
     """straight x-bond ⇒ T = diag(1, 0, 1) in (xz, yz, xy) (xz and xy are C4 partners about the bond axis, hence EQUAL; yz does not hop),
