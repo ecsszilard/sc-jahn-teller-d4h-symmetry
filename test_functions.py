@@ -3,6 +3,7 @@ from __future__ import annotations
 import ast
 import contextlib
 import argparse
+import copy
 import datetime
 import hashlib
 import importlib.util
@@ -119,6 +120,9 @@ def _cluster_36(t_pd, Delta_CT, U_dd, lambda_soc, Delta_tetra, Delta_B1g_static,
     V36 = qm._d1d1_reference_basis(basis)
     H36, w_in, w_out = qm._bdc_heff(ev, ec, V36, f"cluster[{ax}]", verbose=False)
     return dict(H36=H36, w_in=w_in, w_out=w_out, basis=basis, evals=ev, evecs=ec, V36=V36, G6=G6, G7a=G7a, G7b=G7b, B1g=B1g, U_pp=U_pp, S_full=qm._S_FULL[M_axis], H_soc_cf=H_soc_cf)
+
+
+
 
 def _cluster_kappas_of(cl: dict) -> tuple:
     """(κ(Γ6, Γ7a, Γ7b), κ_cross(7a, 7b)) of one cluster, with the model's own projection functions."""
@@ -1106,16 +1110,30 @@ def _pauli_coeff(H, a, b):
     return float(np.real(np.trace(op.conj().T @ H)) / 4.0)
 
 
+
+
+
 def _cluster_K_terms(solver, target_doping: float, M, Q: float, Delta_vec, Quad67, mu: float, g_t: float, g_J: float, schemes: tuple = ('full', 'mf', 'bare')) -> dict:
-    """5-point d²F/dQ² of the PER-SITE cluster free energy `solver._cluster_F` for the requested schemes, at the Q-consistent μ of the bulk density constraint and with the model's own Q step:
-        'full' = qm._CLUSTER_EXACT (exact intra-plaquette exchange)   'mf' = qm._CLUSTER_MF (ALL bonds at mean field)   'bare' = (False, 0.0) (no exchange at all)
-    `_cluster_F` already divides by _CLUSTER_SIZE, so the model's  Delta_K_cluster = K_full − K_MF  (no further division; the old helper divided a second time and was 4× too small)."""
+    """5-point d²F/dQ² of the PER-SITE cluster free energy `solver._cluster_F` (already divided by _CLUSTER_SIZE) at the Q-consistent μ of the bulk density constraint, with the model's own Q step:
+        'full'    = qm._CLUSTER_EXACT, JT on        'mf' = qm._CLUSTER_MF (ALL bonds at MF), JT on        'bare' = (False, 0.0) (no exchange), JT on        'mf_off' = qm._CLUSTER_MF with the local JT term switched off (include_JT = False)
+        'chi_term'= ½ (g_JT·Q·β_c(Q))² χ_loc(M, μ(Q))   the bulk site-local B1g bubble that replaces the cluster-MF JT response (β_c = thermal-FS ⟨β_k⟩, the coupling the cluster actually carries)
+        'matched' = d²/dQ² [F_exact(on) − F_MF(off) + ½ (g Q β_c)² χ_loc]  = the model's Delta_K_cluster (`_dF_cluster`; at Q = 0 itself the JT term vanishes and exact − MF is returned)
+    'full' − 'mf' is the OLD correction (JT response of the plaquette at MF kept inside the reference)."""
     M = np.atleast_1d(np.asarray(M, dtype=float))
     h_Q, _ = qm._q_fd_step(Q)
     mu_at = solver._mu_cache(target_doping, M, Delta_vec, Quad67, mu, g_t, g_J)
     w = np.array([-1.0, 16.0, -30.0, 16.0, -1.0]) / (12.0 * h_Q ** 2)
-    sch = {'full': qm._CLUSTER_EXACT, 'mf': qm._CLUSTER_MF, 'bare': (False, 0.0)}
-    return {nm: float(w @ np.array([solver._cluster_F(M, Q + i * h_Q, Quad67, mu_at(Q + i * h_Q)[0], g_t, g_J, sch[nm], False)[0] for i in (-2, -1, 0, 1, 2)])) for nm in schemes}
+    sch = {'full': qm._CLUSTER_EXACT, 'mf': qm._CLUSTER_MF, 'bare': (False, 0.0), 'mf_off': qm._CLUSTER_MF}
+    Qs = [Q + i * h_Q for i in (-2, -1, 0, 1, 2)]
+    mus = [mu_at(q)[0] for q in Qs]
+    out = {nm: float(w @ np.array([solver._cluster_F(M, q, Quad67, m, g_t, g_J, sch[nm], False, nm != 'mf_off')[0] for q, m in zip(Qs, mus)])) for nm in schemes if nm in sch}
+    if 'chi_term' in schemes or 'matched' in schemes:
+        def chi(q, m):
+            b = solver._cluster_fs_projection(M, q, m, g_t, g_J)[0]
+            return 0.5 * (solver.g_JT_bare * q * b) ** 2 * solver._bdg_local_B1g_chi(M, m, g_t, g_J)
+        out['chi_term'] = float(w @ np.array([chi(q, m) for q, m in zip(Qs, mus)]))
+        out['matched'] = float(w @ np.array([solver._cluster_F(M, q, Quad67, m, g_t, g_J, qm._CLUSTER_EXACT, False)[0] - solver._cluster_F(M, q, Quad67, m, g_t, g_J, qm._CLUSTER_MF, False, False)[0] + chi(q, m) for q, m in zip(Qs, mus)]))
+    return out
 
 
 def _k_terms(solver, target_doping: float, M, Q: float, Delta_vec, Quad67, n_kspace: float, mu: float, g_t: float, g_J: float, vertex_cache: dict | None = None) -> dict:
@@ -1172,13 +1190,90 @@ def _full_relax(solver, target_doping: float, M, Q: float, Delta_vec, Quad67, n_
     return _memo('relax', key, build)
 
 
+def _jt_matching_decomposition(solver, target_doping: float, M, Q: float, Delta_vec, Quad67, mu: float, g_t: float, g_J: float, g_scale: float = 1.0, patterns: bool = True) -> dict:
+    """
+    Local-JT decomposition of the Q-curvature at ONE bulk state (M, Δ, Ξ, the same fixed-density μ(Q) for every term; the model's 5-point Q stencil for every term).
+    JT-off in the CLUSTER is the model's own switch (`include_JT = False`: only β_c·g_JT·Q·B1g is removed, the FS-projected TRW terms stay); JT-off in the BULK is a clone with g_JT_bare = 0 (the local one-body term β_k(Q)·g·Q·B1g
+    is the only place g_JT_bare enters the H stack: checked in the K_eff test).
+        K_BdG_JT = d²[F_band(on) − F_band(off)]            bulk response to the local JT field (itinerant, k-resolved, incl. the μ(Q) feedback),  F_band = ¼(Ω_cell + Ω_trace)
+        K_loc    = −d²[½ (g·Q·β_c)² χ_loc]                  the SITE-LOCAL part of it that `_dF_cluster` removes (χ_loc = `_bdg_local_B1g_chi`, unit coupling; β_c = thermal-FS ⟨β_k⟩ = the coupling the cluster carries)
+        K_MF_JT  = d²[F_MF(on) − F_MF(off)]                 atomic Van Vleck response of the plaquette at MF (what the OLD reference kept);   K_ex_JT = the same with the exact intra-plaquette exchange
+        K_cl_old = d²[F_ex(on) − F_MF(on)]                   K_cl_new = d²[F_ex(on) − F_MF(off) + ½(g Q β_c)² χ_loc]  (= the model's Delta_K_cluster)
+        K_cl_all = K_cl_old + (K_MF_JT − K_BdG_JT)           what-if: replace the WHOLE bulk local-JT response (not only its site-local bubble) by the plaquette response
+    Optional: JT-site-pattern curvature of the exact and MF plaquette, uniform (+,+,+,+) vs staggered (+,−,+,−): JT-off H of the model + site-embedded JT term (uniform reproduces solver._cluster_F: self-check).
+    """
+    M = np.atleast_1d(np.asarray(M, dtype=float))
+    Delta_vec, Quad67 = np.asarray(Delta_vec, dtype=complex), np.asarray(Quad67, dtype=complex)
+    h_Q, _ = qm._q_fd_step(Q)
+    w5 = np.array([-1.0, 16.0, -30.0, 16.0, -1.0]) / (12.0 * h_Q ** 2)
+    on = solver._clone_solver_at_T(solver.kT)
+    on.g_JT_bare = solver.g_JT_bare * g_scale
+    offb = solver._clone_solver_at_T(solver.kT)
+    offb.g_JT_bare = 0.0
+    mu_at = on._mu_cache(target_doping, M, Delta_vec, Quad67, mu, g_t, g_J)
+    Qs = [Q + i * h_Q for i in (-2, -1, 0, 1, 2)]
+    mus = [mu_at(q)[0] for q in Qs]
+    K = lambda vals: float(w5 @ np.asarray(vals))
+    band = lambda sv, q, m: _chk_free_energy_el(sv._get_vbdg(), sv.k_points, sv.k_weights, sv.kT, M, q, Delta_vec, Quad67, m, g_t, g_J)
+    cF = lambda q, m, sch, jt=True: on._cluster_F(M, q, Quad67, m, g_t, g_J, sch, False, jt)[0]
+
+    def chi_term(q, m):
+        b = on._cluster_fs_projection(M, q, m, g_t, g_J)[0]
+        return 0.5 * (on.g_JT_bare * q * b) ** 2 * on._bdg_local_B1g_chi(M, m, g_t, g_J)
+    out = dict(g_JT=float(on.g_JT_bare))
+    out['K_BdG_JT'] = K([band(on, q, m) - band(offb, q, m) for q, m in zip(Qs, mus)])
+    out['K_loc'] = -K([chi_term(q, m) for q, m in zip(Qs, mus)])
+    out['K_MF_JT'] = K([cF(q, m, qm._CLUSTER_MF) - cF(q, m, qm._CLUSTER_MF, False) for q, m in zip(Qs, mus)])
+    out['K_ex_JT'] = K([cF(q, m, qm._CLUSTER_EXACT) - cF(q, m, qm._CLUSTER_EXACT, False) for q, m in zip(Qs, mus)])
+    out['K_cl_old'] = K([cF(q, m, qm._CLUSTER_EXACT) - cF(q, m, qm._CLUSTER_MF) for q, m in zip(Qs, mus)])
+    out['K_cl_new'] = K([cF(q, m, qm._CLUSTER_EXACT) - cF(q, m, qm._CLUSTER_MF, False) + chi_term(q, m) for q, m in zip(Qs, mus)])
+    out['K_cl_all'] = out['K_cl_old'] + out['K_MF_JT'] - out['K_BdG_JT']
+    # FS-variance of the coupling: the local bubble uses ⟨β⟩², the bulk couples with β_k(Q) (⟨β²⟩ ≥ ⟨β⟩²)
+    tx_b, ty_b = on.p.effective_hopping_anisotropic(Q)
+    beta_k = np.asarray(on.p.wave_function_weight(tx_b, ty_b, on.k_points[:, 0], on.k_points[:, 1]), dtype=float)
+    ev_n = np.linalg.eigvalsh(on._get_vbdg()._build_H_stack(on.k_points, M, Q, np.zeros(qm._N_DELTA, dtype=complex), np.zeros(qm._N_QUAD67, dtype=complex), mus[2], g_t, g_J))
+    f_n = qm._fermi_function(ev_n, on.kT)
+    wk = on.k_weights * np.sum(f_n * (1.0 - f_n) / on.kT, axis=1)
+    wk = wk / max(float(wk.sum()), 1e-300)
+    out['beta_c'] = float(on._cluster_fs_projection(M, Q, mus[2], g_t, g_J)[0])
+    out['beta2_ratio'] = float(np.sum(wk * beta_k ** 2) / max(float(np.sum(wk * beta_k)) ** 2, 1e-300))
+    out['chi_loc'] = float(on._bdg_local_B1g_chi(M, mus[2], g_t, g_J))
+    if not patterns:
+        return out
+
+    def pattern_F(q, m_cl, scheme, s, with_jt: bool, Mv):
+        inc_ex, Zv = scheme
+        H = on._build_H_cluster(Mv, q, Zv, Quad67, m_cl, g_t, g_J, inc_ex, True, False)                   # the model's JT-off plaquette
+        if with_jt:
+            X = (on._cluster_fs_projection(Mv, q, m_cl, g_t, g_J)[0] * on.g_JT_bare * q * on.p.B1g_op).astype(complex)
+            X = 0.5 * (X + X.conj().T)
+            for site in range(qm._CLUSTER_SIZE):
+                H = H + float(s[site]) * on._embed1(X, site)
+        ev = np.linalg.eigvalsh(0.5 * (H + H.conj().T))
+        return (float(ev[0]) - on.kT * np.log(max(float(np.sum(np.exp(np.clip(-(ev - ev[0]) / on.kT, -700.0, 0.0)))), qm._MATH_EPS))) / qm._CLUSTER_SIZE
+
+    s_uni, s_stag = np.ones(qm._CLUSTER_SIZE), np.asarray(qm._SIGN_M, dtype=float)
+    q0, m0 = Qs[3], mus[3]
+    Jc = np.asarray(on.p.exchange_channels(q0, g_J)[0], dtype=float)[0::2]
+    rec = pattern_F(q0, m0, qm._CLUSTER_EXACT, s_uni, True, M) + 0.5 * qm._CLUSTER_EXACT[1] * float(np.dot(Jc, M * M))
+    out['recon_err'] = abs(rec - on._cluster_F(M, q0, Quad67, m0, g_t, g_J, qm._CLUSTER_EXACT, False)[0])
+    pat = {}
+    for tag, Mv in (('state M', M), ('M = 0', np.zeros_like(M))):
+        for nm, s in (('uniform', s_uni), ('staggered', s_stag)):
+            kx = K([pattern_F(q, m, qm._CLUSTER_EXACT, s, True, Mv) - pattern_F(q, m, qm._CLUSTER_EXACT, s, False, Mv) for q, m in zip(Qs, mus)])
+            km = K([pattern_F(q, m, qm._CLUSTER_MF, s, True, Mv) - pattern_F(q, m, qm._CLUSTER_MF, s, False, Mv) for q, m in zip(Qs, mus)])
+            pat[(tag, nm)] = (kx, km)
+    out['patterns'] = pat
+    return out
+
+
 def test_lattice_stiffness_definitions(solver, target_doping: float, M_bdg: np.ndarray, Q: float, Delta_vec: np.ndarray, Quad67: np.ndarray, n_kspace: float, mu: float, g_t: float, g_J: float, vertex_cache: dict | None = None,
                                        label: str = "state", tol: float = 1e-5, n_delta: int | None = None, n_xi: int | None = None) -> None:
     """What the model's Q-stiffness numbers mean, re-derived here from the free-energy functions (nothing is read back from the model except the quantities under test).
     The model's cluster dict no longer returns K_bulk / K_frozen / K_relaxed / K_schur_raw: it returns Delta_K_cluster, and `compute_full_relaxed_stiffness` returns the TOTAL curvature of F_tot = F_can + ΔF_cluster
     (K_lattice/2·Q² is inside F_can; the cluster term is inside; μ refit at fixed density, vertex frozen) with the y = (M, Re/Im Δ, Re/Im Ξ) block relaxed by a Schur complement:
         K_frozen_full = H_QQ                      K_full_relaxed = H_QQ − H_Qy H_yy⁺ H_yQ     K_schur_{M,Delta,Xi} = the curvature after relaxing ONLY that block
-    [1] K_frozen_full = K_bulk + K_cluster, K_bulk = 5-point d²F_can/dQ² computed here   [2] Delta_K_cluster = K_full − K_MF of `solver._cluster_F` (per-site, NO extra 1/_CLUSTER_SIZE)
+    [1] K_frozen_full = K_bulk + K_cluster, K_bulk = 5-point d²F_can/dQ² computed here   [2] Delta_K_cluster = d²[F_exact(JT on) − F_MF(JT off) + ½(g_JT·Q·β_c)²·χ_loc] of `solver._cluster_F` / `_bdg_local_B1g_chi` (per-site, NO extra 1/_CLUSTER_SIZE)
     [3] relaxing can only soften (H_yy ⪰ 0): K_full_relaxed ≤ K_frozen_full and ≤ every partial relaxation  [4] U(1): F_can(Δ·e^{iφ}) = F_can(Δ);  Δ = 0 → no Δ channel relaxed
     [5] one-variable relaxation along |Δ| computed here (K_relaxed = K_frozen − H_QD²/H_DD) is never softer than the model's multi-variable Schur complement."""
     M = np.atleast_1d(np.asarray(M_bdg, dtype=float))
@@ -1201,11 +1296,11 @@ def test_lattice_stiffness_definitions(solver, target_doping: float, M_bdg: np.n
     n_fail += (not ok1)
     _log(f"  [1] K_frozen_full = K_bulk + Delta_K_cluster: |diff| = {abs(K_fr - kt['K_frozen']):.1e} (allowed {slack:.1e})   {'✓ PASS' if ok1 else '❌ FAIL'}")
 
-    cl = _cluster_K_terms(solver, target_doping, M, Q, Delta_vec, Quad67, mu, g_t, g_J, ('full', 'mf'))
-    dK = cl['full'] - cl['mf']
-    ok2 = abs(dK - kt['K_cluster']) <= tol * max(1.0, abs(kt['K_cluster']))
+    cl = _cluster_K_terms(solver, target_doping, M, Q, Delta_vec, Quad67, mu, g_t, g_J, ('full', 'mf', 'mf_off', 'chi_term', 'matched'))
+    ok2 = abs(cl['matched'] - kt['K_cluster']) <= tol * max(1.0, abs(kt['K_cluster']))
     n_fail += (not ok2)
-    _log(f"  [2] K_full − K_MF = {cl['full']:+.5f} − {cl['mf']:+.5f} = {dK:+.6e} vs Delta_K_cluster = {kt['K_cluster']:+.6e}   {'✓ PASS' if ok2 else '❌ FAIL (normalisation of the beyond-MF cluster correction)'}")
+    _log(f"  [2] Delta_K_cluster = d²[F_exact(on) − F_MF(off) + ½(g·Q·β_c)²χ_loc] = {cl['full']:+.5f} − {cl['mf_off']:+.5f} + {cl['chi_term']:+.5f} = {cl['matched']:+.6e} vs model {kt['K_cluster']:+.6e}   {'✓ PASS' if ok2 else '❌ FAIL (the beyond-MF cluster correction is not assembled as documented: per-site normalisation / JT-off reference / β_c·χ_loc term)'}")
+    _log(f"      old reference (JT response kept at cluster MF): K_full − K_MF(on) = {cl['full'] - cl['mf']:+.5f};  the JT double-counting term moves the correction by {cl['matched'] - (cl['full'] - cl['mf']):+.5f}")
 
     if rl['well_defined']:
         sl = 3.0 * kt['noise'] + 1e-6
@@ -1241,10 +1336,12 @@ def test_lattice_stiffness_definitions(solver, target_doping: float, M_bdg: np.n
 
 def test_cluster_K_eff_diagnostics(solver, target_doping, M, Q, Delta_vec, Quad67_vec, n_kspace, mu, g_t, g_J,
                                     M_normal=None, mu_normal=None, run_Q_scan: bool = True, run_M2_scan: bool = True, run_full_relax: bool = True,
-                                    Q_scan_halfwidth: float = 0.03, n_Q_scan: int = 7, M_frac_scan: tuple[float, ...] = (0.5, 0.75, 1.0, 1.25, 1.5), vertex_cache: dict | None = None):
+                                    Q_scan_halfwidth: float = 0.03, n_Q_scan: int = 7, M_frac_scan: tuple[float, ...] = (0.5, 0.75, 1.0, 1.25, 1.5), vertex_cache: dict | None = None,
+                                    run_jt_matching: bool = True, run_jt_full_checks: bool = True):
     """Where the Q-stiffness of the JT mode comes from, and whether the condensate flips its sign (the model's JT label: K_N(0) > 0 and K_SC(0) < 0 ⇒ SC-triggered).
-    Terms: K_bulk (d²F_can/dQ², K_lattice included), K_cluster = Delta_K_cluster = K_full − K_MF (beyond-MF intra-plaquette exchange, per site), K_schur (relaxation of |Δ|) — all assembled by `_k_terms` / `_cluster_K_terms`.
-    [A] Q-dependence of the cluster terms   [B] M² scaling of K_cluster   [C] beyond-MF subtraction sum rule   [D] Δ-dependence at the state   [E] N → SC at Q = 0: frozen / |Δ|-relaxed / (optionally) the model's full relaxed curvature, and the label"""
+    Terms: K_bulk (d²F_can/dQ², K_lattice included), K_cluster = Delta_K_cluster (beyond-MF intra-plaquette exchange + JT double counting by the bulk local B1g bubble, per site), K_schur (relaxation of |Δ|) — all assembled by `_k_terms` / `_cluster_K_terms`.
+    [A] Q-dependence of the cluster terms   [B] M² scaling of K_cluster   [C] beyond-MF subtraction sum rule   [D] Δ-dependence at the state   [E] N → SC at Q = 0: frozen / |Δ|-relaxed / (optionally) the model's full relaxed curvature, and the label
+    [F] local-JT on/off decomposition: bulk BdG vs plaquette-MF vs exact plaquette response, the what-if of a 'matched' cluster reference, g_JT = 0 limit, g² scaling, uniform vs staggered JT pattern"""
     vertex_cache = vertex_cache if vertex_cache is not None else _registered_cache(M, Q, Delta_vec, Quad67_vec, n_kspace, mu, g_t, g_J)
     p = solver.p
     M = np.atleast_1d(np.asarray(M, dtype=float))
@@ -1264,12 +1361,13 @@ def test_cluster_K_eff_diagnostics(solver, target_doping, M, Q, Delta_vec, Quad6
     K_el_N = solver.g_JT_bare ** 2 * chi_QQ_N
     _log(f"  state: Q = {Q:+.5f}  M = {np.array2string(M, precision=4)}   V_irr_QQ = {kt['V_irr_QQ']:+.5f}  V_JT_corr = {kt['V_JT_corr']:+.5f}")
     _log(f"      K_bulk      = {kt['K_bulk']:+.5f}   (incl. K_lattice = {p.K_lattice:+.3f})")
-    _log(f"      K_cluster   = {kt['K_cluster']:+.5f}   (= K_full − K_full_MF, per site)    |K_cluster|/|K_el^N| = {abs(kt['K_cluster']) / max(abs(K_el_N), 1e-12):.3f}")
+    _log(f"      K_cluster   = {kt['K_cluster']:+.5f}   (per site; JT double counting by the bulk site-local B1g bubble)    |K_cluster|/|K_el^N| = {abs(kt['K_cluster']) / max(abs(K_el_N), 1e-12):.3f}")
     _log(f"      K_frozen    = {kt['K_frozen']:+.5f}   K_schur_raw = {kt['K_schur_raw']:+.5f}   K_relaxed = {kt['K_relaxed']:+.5f}   (H_DD = {kt['H_DD']:+.3e})")
     _log(f"      K_full = {K_full:+.5f}   K_full_MF = {K_MF:+.5f}   K_bare = {K_bare:+.5f}")
-    ok = abs((K_full - K_MF) - kt['K_cluster']) <= 1e-6 * max(1.0, abs(kt['K_cluster']))
+    clm = _cluster_K_terms(solver, target_doping, M, Q, Delta_vec, Quad67_vec, mu, g_t, g_J, ('full', 'mf_off', 'chi_term', 'matched'))
+    ok = abs(clm['matched'] - kt['K_cluster']) <= 1e-6 * max(1.0, abs(kt['K_cluster']))
     n_fail += (not ok)
-    _log(f"      K_full − K_full_MF = {K_full - K_MF:+.6e} vs Delta_K_cluster = {kt['K_cluster']:+.6e}   {'✓ PASS' if ok else '❌ FAIL'}")
+    _log(f"      Delta_K_cluster = K_full − K_MF(JT off) + χ-term = {clm['full']:+.5f} − {clm['mf_off']:+.5f} + {clm['chi_term']:+.5f} = {clm['matched']:+.6e} vs model {kt['K_cluster']:+.6e}   {'✓ PASS' if ok else '❌ FAIL'}   (old K_full − K_full_MF = {K_full - K_MF:+.5f})")
     _log("")
 
     def _spread(arr):
@@ -1348,6 +1446,55 @@ def test_cluster_K_eff_diagnostics(solver, target_doping, M, Q, Delta_vec, Quad6
     soft = (K_N - K_S) / max(abs(K_N), qm._MATH_EPS)
     label = 'INDETERMINATE' if not (np.isfinite(K_N) and np.isfinite(K_S)) else ('N-UNSTABLE' if K_N <= 0.0 else ('SC-TRIGGERED' if K_S < 0.0 else ('SOFTENED' if soft >= qm._JT_SOFT_THR else 'BLOCKED')))
     _log(f"      label ({how}): {label}   K_N = {K_N:+.4f} → K_SC = {K_S:+.4f} eV/Å²  (softening {soft:+.2f}; threshold {qm._JT_SOFT_THR:.2f})")
+    if run_jt_matching:
+        _log("")
+        _log("  [F] local-JT decomposition of the cluster reference (at Q = 0 with the state's M, Δ, Ξ, like [E]; nothing of the model is modified: cluster JT-off = the model's include_JT = False, bulk JT-off = a clone with g_JT_bare = 0, same μ(Q))")
+        d = _jt_matching_decomposition(solver, target_doping, M, 0.0, Delta_vec, Quad67_vec, mu_S0, g_t, g_J, 1.0, patterns=True)
+        g = d['g_JT']
+        _log(f"      g_JT = {g:.4f}   β_c = {d['beta_c']:.4f}   χ_loc = {d['chi_loc']:.4f} 1/eV   ⟨β²⟩/⟨β⟩² over the thermal FS = {d['beta2_ratio']:.3f}   ({'✓ the ⟨β⟩² in the local bubble is a good proxy' if d['beta2_ratio'] < 1.1 else '✗ β_k varies over the FS: the local bubble with ⟨β⟩² understates the bulk local coupling by up to this factor'})")
+        _log(f"      K_BdG_JT = {d['K_BdG_JT']:+.5f} (bulk response to the local JT field)   K_loc = {d['K_loc']:+.5f} (its site-local bubble, removed by the double counting)   K_MF_JT = {d['K_MF_JT']:+.5f}   K_exact_JT = {d['K_ex_JT']:+.5f}")
+        frac = d['K_loc'] / d['K_BdG_JT'] if abs(d['K_BdG_JT']) > 1e-12 else float('nan')
+        _log(f"      site-local fraction of the bulk JT response K_loc / K_BdG_JT = {frac:.3f}   " + ('✓ the subtraction stays inside what the bulk contains' if 0.0 <= frac <= 1.0 else '✗ outside [0, 1]: the removed local bubble exceeds (or opposes) the whole bulk response — double counting overshoots'))
+        _log(f"      exact / MF plaquette JT response = {d['K_ex_JT'] / d['K_MF_JT'] if abs(d['K_MF_JT']) > 1e-12 else float('nan'):.3f} (correlation quenching of the local response);   plaquette-MF response vs local bubble: K_MF_JT / K_loc = {d['K_MF_JT'] / d['K_loc'] if abs(d['K_loc']) > 1e-12 else float('nan'):.3f}")
+        ok = abs(d['K_cl_new'] - kS['K_cluster']) <= 1e-6 * max(1.0, abs(kS['K_cluster']))
+        n_fail += (not ok)
+        _log(f"      K_cluster: old (JT response kept at cluster MF) {d['K_cl_old']:+.5f}  →  model (local bubble subtracted) {d['K_cl_new']:+.5f} vs Delta_K_cluster {kS['K_cluster']:+.5f}   {'✓ PASS' if ok else '❌ FAIL'};   what-if whole bulk response replaced: {d['K_cl_all']:+.5f}")
+        _log(f"      K_frozen: old definition {kS['K_frozen'] - d['K_cl_new'] + d['K_cl_old']:+.5f}   model {kS['K_frozen']:+.5f}   whole-response replacement {kS['K_frozen'] - d['K_cl_new'] + d['K_cl_all']:+.5f}")
+        dF0, dFe = solver._dF_cluster(M, 0.0, Delta_vec, Quad67_vec, mu_S0, g_t, g_J)[0], solver._dF_cluster(M, 1e-6, Delta_vec, Quad67_vec, mu_S0, g_t, g_J)[0]
+        ok = abs(dFe - dF0) < 1e-7 * max(1.0, abs(dF0))
+        n_fail += (not ok)
+        _log(f"      continuity of ΔF_cluster at Q = 0 (the Q = 0 branch returns exact − MF): |ΔF(1e-6) − ΔF(0)| = {abs(dFe - dF0):.1e}   {'✓ PASS' if ok else '❌ FAIL (the two branches disagree: the stencil centre point is inconsistent)'}")
+        ok = d['recon_err'] < 1e-9
+        n_fail += (not ok)
+        _log(f"      plaquette = model JT-off H + site-embedded JT term (uniform) vs solver._cluster_F: {d['recon_err']:.1e}   {'✓ PASS' if ok else '❌ FAIL (include_JT removes more or less than β_c·g·Q·B1g)'}")
+        pat = d['patterns']
+        for tag in ('state M', 'M = 0'):
+            (ku, kmu), (ks_, kms) = pat[(tag, 'uniform')], pat[(tag, 'staggered')]
+            _log(f"      JT pattern, {tag:<7s} uniform (+,+,+,+): K_exact {ku:+.6f}  K_MF {kmu:+.6f}  K_corr {ku - kmu:+.6f}   |  staggered (+,−,+,−): K_exact {ks_:+.6f}  K_MF {kms:+.6f}  K_corr {ks_ - kms:+.6f}")
+        dpat = max(abs(pat[(t, 'uniform')][0] - pat[(t, 'staggered')][0]) for t in ('state M', 'M = 0'))
+        _log(f"      uniform vs staggered exact response: max|ΔK| = {dpat:.2e}   " + ("→ pattern-independent: the plaquette couples sites only through channel-diagonal spin exchange (and J_B1g·Quad67), so the JT quenching is a LOCAL multiplet / projected-B1g effect, not a spatial-correlation effect" if dpat < 1e-5 * max(abs(d['K_ex_JT']), 1e-12) else "→ the quenching depends on the spatial pattern of the JT field (inter-site correlations matter)"))
+        if run_jt_full_checks:
+            d0 = _jt_matching_decomposition(solver, target_doping, M, 0.0, Delta_vec, Quad67_vec, mu_S0, g_t, g_J, 0.0, patterns=False)
+            ok = abs(d0['K_cl_new'] - d0['K_cl_old']) < 1e-10 * max(1.0, abs(d0['K_cl_old'])) and max(abs(d0['K_BdG_JT']), abs(d0['K_MF_JT']), abs(d0['K_ex_JT']), abs(d0['K_loc'])) < 1e-9
+            n_fail += (not ok)
+            _log(f"      g_JT = 0 limit: K_new − K_old = {d0['K_cl_new'] - d0['K_cl_old']:+.1e}, JT responses {d0['K_BdG_JT']:+.1e} / {d0['K_MF_JT']:+.1e} / {d0['K_ex_JT']:+.1e} / local {d0['K_loc']:+.1e}   {'✓ PASS' if ok else '❌ FAIL'}")
+            d2 = _jt_matching_decomposition(solver, target_doping, M, 0.0, Delta_vec, Quad67_vec, mu_S0, g_t, g_J, 2.0, patterns=False)
+            r = lambda k: d2[k] / d[k] if abs(d[k]) > 1e-12 else float('nan')
+            ok = all(abs(r(k) - 4.0) < 1e-3 for k in ('K_MF_JT', 'K_ex_JT', 'K_loc'))
+            n_fail += (not ok)
+            _log(f"      g → 2g (4 expected for a response ∝ g²): plaquette MF ×{r('K_MF_JT'):.4f}, exact ×{r('K_ex_JT'):.4f}, local bubble ×{r('K_loc'):.4f}   {'✓ PASS' if ok else '❌ FAIL'};   bulk BdG ×{r('K_BdG_JT'):.3f} " + ("(quadratic)" if abs(r('K_BdG_JT') - 4.0) < 0.05 else "✗ not ∝ g²: μ(Q) feedback / β_k(Q) in the itinerant response — the local bubble is the quadratic, site-local part of it only"))
+        kp = solver.k_points[:16]
+        gg = solver.g_JT_bare
+        Hs = []
+        for fac in (1.0, 2.0, 0.0):
+            c = solver._clone_solver_at_T(solver.kT)
+            c.g_JT_bare = gg * fac
+            Hs.append(c._get_vbdg()._build_H_stack(kp, M, Q if abs(Q) > 1e-6 else 0.02, Delta_vec, Quad67_vec, mu, g_t, g_J, out=None).copy())
+        lin = float(np.max(np.abs((Hs[1] - Hs[2]) - 2.0 * (Hs[0] - Hs[2]))))
+        nz = float(np.max(np.abs(Hs[0] - Hs[2])))
+        ok = lin < 1e-12 and nz > 1e-8
+        n_fail += (not ok)
+        _log(f"      bulk JT switch acts only on the local one-body term: H(g) − H(0) linear in g (residual {lin:.1e}) and non-zero ({nz:.2e}) at Q ≠ 0   {'✓ PASS' if ok else '❌ FAIL'}")
     _log("=" * 95)
     _log(f"  {'✓ PASS' if n_fail == 0 else '❌ FAIL'} — cluster K_eff diagnostics   (K_frozen = K_bulk + K_cluster = {kt['K_frozen']:+.4f};  K_lattice = {p.K_lattice:+.4f} sits inside K_bulk)")
     _log("=" * 95)
@@ -1842,10 +1989,10 @@ def _fs_thermal_sampling_vs_kT(solver, M, Q: float, mu: float, g_t: float, g_J: 
     """
     What the thermal Fermi-surface sample of `_get_fs_points` does when kT changes (the λ_lin(T) = 1 Tc search runs over a whole kT range, and the sample is rebuilt at every T):
       shell      : grid points with f(1−f) > _FS_THERMAL_THRESHOLD, i.e. |E| < x*·kT with x* = 2·arccosh(1/(2·sqrt(thr))) ≈ 6 kT  (energy width ∝ kT, scale-free)
-      cap        : thermal_fs_nat_size = max(kT/t0·_NK², _N_IRREP + 16) whole symmetry orbits of the shell are kept (weights re-normalised to the full shell weight, the GEOMETRY is not)
+      cap        : thermal_fs_nat_size = _FS_NAT_MAX (a constant: pair tables ∝ N_fs²); the shell is taken COMPLETELY below it, above it whole symmetry orbits are kept (weights re-normalised to the full shell weight, the GEOMETRY is not)
       resolution : the shell's width in k, x*·kT/|v_F|, against the grid step 2π/_NK — below one step the 'shell' is a few accidental grid points (aliasing: λ_lin(T) jumps with T instead of varying smoothly)
       basis      : rank / condition of the harmonic Gram matrix on the sample (too few / collinear points cannot separate s, d, g, … ) and the closure flags the odd-parity / T_Q projections of the kernel assume
-    Constants that scale with kT automatically: x* (threshold on f(1−f), kT-free), the Gaussian orbital window _FS_SAMPLING·kT, n_target ∝ kT.  Constants that do NOT scale: the grid step (_NK), _DQ_FS_VERTEX, _FS_CACHE_TOL, the floor _N_IRREP + 16.
+    Constants that scale with kT automatically: x* (threshold on f(1−f), kT-free) and the Gaussian orbital window _FS_SAMPLING·kT.  Constants that do NOT scale: the grid step (_NK), the cap _FS_NAT_MAX (the shell grows ∝ kT until it reaches it), _DQ_FS_VERTEX, _FS_CACHE_TOL.
     Flags (✗) are interpretation warnings; only an EMPTY sample counts as FAIL.
     """
     M = np.asarray(M, dtype=float)
@@ -1856,7 +2003,7 @@ def _fs_thermal_sampling_vs_kT(solver, M, Q: float, mu: float, g_t: float, g_J: 
     _log("")
     _log("  [6] thermal FS sample vs kT (the sample is rebuilt at every temperature of the Tc scan)")
     _log(f"      shell: f(1−f) > {thr} ⇒ |E| < {x_star:.2f}·kT (kT-free);   orbital window σ = _FS_SAMPLING·kT = {qm._FS_SAMPLING}·kT vs thermal-kernel std π/√3·kT = 1.81·kT (ratio {qm._FS_SAMPLING / (np.pi / np.sqrt(3.0)):.2f});   a window of {qm._FS_SAMPLING}·kT drops {100 * lost_window:.1f}% of the f(1−f) weight")
-    _log(f"      grid step 2π/_NK = {dk:.4f};   n_target = max(kT/t0·_NK², _N_IRREP + 16 = {qm._N_IRREP + 16});   t0 = {solver.p.t0:.4f} eV")
+    _log(f"      grid step 2π/_NK = {dk:.4f} (_NK = {qm._NK});   cap n_target = _FS_NAT_MAX = {qm._FS_NAT_MAX} (constant);   t0 = {solver.p.t0:.4f} eV")
     _log(f"      {'kT/kT0':>7s} {'kT[meV]':>8s} {'T[K]':>7s} {'n_target':>8s} {'N_shell':>8s} {'N_fs':>6s} {'⟨|v_F|⟩':>8s} {'shell[meV]':>10s} {'shell/dk':>9s} {'rank/n':>7s} {'cond(S)':>9s} {'closed':>7s}  notes")
     rows, fails = [], 0
     for f in kT_factors:
@@ -1889,9 +2036,7 @@ def _fs_thermal_sampling_vs_kT(solver, M, Q: float, mu: float, g_t: float, g_J: 
         if ratio < 1.0:
             notes.append(f"✗ shell thinner than a grid step ({ratio:.2f}): aliased sample")
         if n_fs < n_shell:
-            notes.append(f"✗ capped: {n_fs}/{n_shell} shell points (n_target {'floor' if n_tgt == qm._N_IRREP + 16 else '∝ kT'})")
-        if n_tgt == qm._N_IRREP + 16 and n_shell > n_tgt:
-            notes.append("✗ floor binds")
+            notes.append(f"✗ capped: {n_fs}/{n_shell} shell points (_FS_NAT_MAX = {n_tgt}): raise it (memory ∝ N_fs²) or lower kT")
         if rank < qm._N_IRREP:
             notes.append(f"✗ rank {rank}/{qm._N_IRREP}: harmonics not separable on this sample")
         if not (clo[0] and clo[1] and clo[2] and clo[3]):
@@ -1899,13 +2044,14 @@ def _fs_thermal_sampling_vs_kT(solver, M, Q: float, mu: float, g_t: float, g_J: 
         if n_fs < qm._VERTEX_DIAG_MIN_FS:
             notes.append(f"✗ N_fs < {qm._VERTEX_DIAG_MIN_FS}: vertex diagnostics unreliable")
         if rows and n_shell == rows[-1][1] and f > rows[-1][0]:
-            notes.append("✗ shell saturated: it already covers the whole fundamental domain (kT too large for this band: the sample is no longer a Fermi surface)")
+            notes.append("✗ shell saturated: it already covers the whole fundamental domain at this _NK — the sample is the whole zone, not a Fermi surface (raise _NK, or kT is too large for the band)")
         rows.append((f, n_shell, n_tgt, ratio))
         _log(f"      {f:>7.2f} {1e3 * T:>8.3f} {T / kB:>7.1f} {n_tgt:>8d} {n_shell:>8d} {n_fs:>6d} {v:>8.3f} {1e3 * shell_E:>10.1f} {ratio:>9.2f} {rank:>3d}/{qm._N_IRREP:<3d} {cond:>9.1e} {'✓' if all(clo[:4]) else '✗':>7s}  " + ('; '.join(notes) if notes else '✓'))
-    if len(rows) >= 2:
-        rr = np.array([n_shell / max(n_t, 1) for _, n_shell, n_t, _ in rows])
-        _log(f"      N_shell / n_target over the scan: {np.array2string(rr, precision=2)}  — a constant ≥ 1 means n_target ∝ kT tracks the shell; a ratio that grows with kT means the cap (and the floor at low kT) truncates the sample and the λ_lin(T) curve")
-        _log("      to raise kT: (1) keep N_shell ≤ n_target (thermal_fs_nat_size ∝ kT already, check the table), (2) shell/dk ≥ 1 is automatic when kT grows, (3) _FS_SAMPLING·kT and the thermal threshold need no change, (4) the fixed constants _DQ_FS_VERTEX / _FS_CACHE_TOL do not depend on kT;")
+    if rows:
+        f1, n1 = max(((f, n) for f, n, _, _ in rows), key=lambda r: r[0] if r[1] < qm._FS_NAT_MAX else -1.0)
+        n_last = rows[-1][1]
+        _log(f"      N_shell(kT) = {[r[1] for r in rows]} at kT/kT0 = {[r[0] for r in rows]};  the shell grows ≈ ∝ kT until the whole fundamental domain is covered, the cap _FS_NAT_MAX = {qm._FS_NAT_MAX} then truncates it at ≈ {solver.kT * qm._FS_NAT_MAX / max(rows[min(range(len(rows)), key=lambda i: abs(rows[i][0] - 1.0))][1], 1):.4f} eV (linear extrapolation of the shell size from kT0)")
+        _log("      to raise kT: nothing has to change while N_shell < _FS_NAT_MAX and the shell is not saturated (x*, the orbital window and the weights are kT-scaled); beyond the cap raise _FS_NAT_MAX or accept truncation;")
         _log("      to LOWER kT (the physical Tc range): shell/dk < 1 first appears — raise _NK (not the constants) or accept an orbit-resolved sample; do not read λ_lin(T) there as smooth")
     return fails
 
@@ -1993,6 +2139,8 @@ def test_fs_sector_spectrum(solver, target_doping: float, M: np.ndarray, Q: floa
         _log("      ⚠ channels with frac > 0 but NOT in any seeded sector: " + ', '.join(f"{names[i]}: {frac[i]:.6f}" for i in range(n) if frac[i] > 1e-12 and i not in seeded_ch))
     _log(f"      frac distribution: {np.array2string(frac, precision=4)}")
     checks = (('finite', finite), ('block', block), ('diag_nz', diag_nz), ('lead', lead_ok), ('frac', frac_norm_ok and frac_support_ok))
+    n_kT_fail = _fs_thermal_sampling_vs_kT(solver, M, Q, mu, g_t, g_J, kT_factors)
+    checks = checks + (('nonempty FS sample at every kT', n_kT_fail == 0),)
     _log(f"  {'✓ PASS' if all(v for _, v in checks) else '❌ FAIL'}  ({'all invariants hold' if all(v for _, v in checks) else 'failed check(s): ' + ', '.join(k for k, v in checks if not v)})")
     _log("=" * 108)
 
@@ -4082,9 +4230,11 @@ def test_superexchange_convention_and_Heisenberg_factor(solver, target_doping: f
     kx, cx_ = _cluster_kappas_of(cl['x'])
     ky, cy_ = _cluster_kappas_of(cl['y'])
     d1 = max(np.max(np.abs(kx - p.kappa_doublets_x)), np.max(np.abs(ky - p.kappa_doublets_y)), np.max(np.abs(0.5 * (cx_ + cy_) - p.kappa_cross)), np.max(np.abs(np.concatenate([kx, ky, cx_, cy_]) - kmod)))
+    dH = max(float(np.max(np.abs(p._cluster_H36(Qv, ax)[0] - _cluster_36(*pars, ax=ax, Q=Qv, V_ddpi=p.V_ddpi, rho_dddelta=p.rho_dddelta_over_pi, M_axis=p.M_axis)['H36']))) for ax in 'xy' for Qv in (0.0, 0.03))
+    d1 = max(d1, dH)
     ok = d1 < 1e-6 * max(1.0, float(np.max(np.abs(p.kappa_doublets))))
     n_fail += (not ok)
-    _log(f"  [1] mirror of ModelParams: κ(Γ6/Γ7a/Γ7b) x {np.array2string(kx, precision=5)}  y {np.array2string(ky, precision=5)}  κ^B1g(7a, 7b) x {np.array2string(cx_, precision=4)} y {np.array2string(cy_, precision=4)}   max|Δ| to the model (spline at Q = 0) = {d1:.1e}   {'✓ PASS' if ok else '❌ FAIL'}")
+    _log(f"  [1] mirror of ModelParams: κ(Γ6/Γ7a/Γ7b) x {np.array2string(kx, precision=5)}  y {np.array2string(ky, precision=5)}  κ^B1g(7a, 7b) x {np.array2string(cx_, precision=4)} y {np.array2string(cy_, precision=4)}   max|Δ| to the model (spline at Q = 0, and the 36-state H_eff of `_cluster_H36` at Q = 0, 0.03) = {d1:.1e}   {'✓ PASS' if ok else '❌ FAIL'}")
     _log()
 
     # [2], [3] per bond and doublet
@@ -4162,6 +4312,8 @@ def test_superexchange_convention_and_Heisenberg_factor(solver, target_doping: f
     n_fail += (not ok5)
     _log(f"  [5] κ(Q) on |Q| ≤ {qm._KAPPA_Q_GRID_MAX} Å ({qm._KAPPA_Q_GRID_N} nodes): spline − ED at nodes {e_node:.1e}; relative spline error between nodes {e_mid:.1e} (≤ {spline_tol:.0e});  B1g covariance κ_x(Q) = κ_y(−Q): {cov:.1e} (intra), {cov_c:.1e} (cross)   {'✓ PASS' if ok5 else '❌ FAIL'}")
     _log(f"      beyond the grid: jump over 1e-7 Å at the edge {jump:.1e}, |dκ/dQ| there {slope:.2e} eV/Å (a jump ≫ slope·1e-7 would mean a discontinuity)   {'✓' if jump < 10.0 * slope * 1e-7 + 1e-9 else '✗'}")
+    ext = [(q, float(np.max(np.abs(p._kappa_Q(q) - ed(q)) / np.maximum(np.abs(ed(q)), 1e-3)))) for q in (0.08, qm._KAPPA_Q_ISO_WARN, -qm._KAPPA_Q_ISO_WARN)]
+    _log('      continuation beyond the grid vs ED: ' + ', '.join(f'|Q| = {abs(q):.2f}: {e:.1%}' for q, e in ext) + '   ' + ('✓' if max(e for _, e in ext) < 0.05 else '✗ the d^−p continuation departs from the cluster ED by more than 5% inside the window the SCF may visit: enlarge _KAPPA_Q_GRID_MAX or accept the extrapolation error'))
     _log(f"      κ_x(Γ6) at Q = 0 / ±{qm._KAPPA_Q_GRID_MAX}: {p._kappa_Q(0.0)[0]:+.5f} / {p._kappa_Q(qm._KAPPA_Q_GRID_MAX)[0]:+.5f} / {p._kappa_Q(-qm._KAPPA_Q_GRID_MAX)[0]:+.5f}   (x bond shortens for Q > 0)")
     _log()
 
@@ -4194,9 +4346,10 @@ def test_superexchange_convention_and_Heisenberg_factor(solver, target_doping: f
         okd = d2 < max(1e-9, spline_tol * float(np.max(np.abs(p2.kappa_doublets))))
         n_fail += (not okd)
         _log(f"      trial model V_ddπ = +50 meV, ρ = −0.25: κ̄ = {np.array2string(p2.kappa_doublets, precision=5)} (ratio to no-dd {np.array2string(p2.kappa_doublets / np.where(np.abs(k_nodd) > 1e-12, k_nodd, np.nan), precision=3)});  standalone extraction vs ModelParams (Q = 0 and Q = 0.04): max|Δ| = {d2:.1e}   {'✓ PASS' if okd else '❌ FAIL'}")
-    wi, wo = p._clu['iso']
+    iso_pts = [(ax, q, _cluster_36(*pars, ax=ax, Q=q, V_ddpi=p.V_ddpi, rho_dddelta=p.rho_dddelta_over_pi, M_axis=p.M_axis)) for ax in 'xy' for q in (0.0, qm._KAPPA_Q_GRID_MAX, qm._KAPPA_Q_ISO_WARN)]
+    wi, wo = min(c_['w_in'] for _, _, c_ in iso_pts), max(c_['w_out'] for _, _, c_ in iso_pts)
     ok7 = wi >= 0.5 and wo <= 0.5 * wi
-    _log(f"      worst reference-space isolation over the Q grid: w_in ≥ {wi:.3f}, w_out ≤ {wo:.3f}   {'✓' if ok7 else '✗ not isolated at the grid edge: reduce _KAPPA_Q_GRID_MAX (κ there is a quasi-degenerate projection)'}")
+    _log(f"      worst reference-space isolation at Q = 0, ±_KAPPA_Q_GRID_MAX and ±_KAPPA_Q_ISO_WARN: w_in ≥ {wi:.3f}, w_out ≤ {wo:.3f}   {'✓' if ok7 else '✗ not isolated within the visited |Q| window: κ there is a quasi-degenerate projection'}")
     _log()
 
     # [8] weighted ZSA, SK(+dd) vs isotropic legacy cluster
@@ -7461,6 +7614,225 @@ def _registry_checks() -> None:
     test_channel_registry_selfcheck()
 
 
+def _synthetic_gate_payload() -> tuple[dict, dict, dict]:
+    """Minimal production-shaped payloads for the fail-closed SCF gate."""
+    keys = list(qm._G_OPS)
+    si = keys.index(tuple(qm._SCF_GATE_SECTOR))
+    frac = np.zeros((len(keys), qm._N_IRREP), dtype=float)
+    # Required sector: one dominant B1g basis function plus smaller A1g content.
+    frac[si, qm._IRREP_NAMES.index('d')] = 0.8
+    frac[si, qm._IRREP_NAMES.index('es')] = 0.2
+    sector_C = np.zeros((len(keys), qm._N_CHANNELS), dtype=float)
+    sector_C[si, 1] = 0.2
+    cache = {
+        'lambda_lin_max': 1.2,
+        'leading_sector': tuple(qm._SCF_GATE_SECTOR),
+        'sector_keys': keys,
+        'sector_frac': frac,
+        'sector_C': sector_C,
+    }
+    normal = {
+        'converged': True,
+        'scf_iteration_converged': True,
+        'past_qcp': False,
+        'det_afm_final': 0.5,
+        'Q': 0.0,
+    }
+    stiffness = {
+        'well_defined': True,
+        'K_full_relaxed': 2.0,
+        'partial': True,
+        'reason': 'ok',
+    }
+    return cache, normal, stiffness
+
+
+def _record_gate_check(failures: list[str], ok: bool, label: str) -> None:
+    """Record one synthetic-gate assertion and retain every failed label."""
+    if ok:
+        _log(f"  ✓ {label}")
+    else:
+        _log(f"  ❌ FAIL — {label}")
+        failures.append(label)
+
+
+def _check_gate_synthetic_inputs(failures: list[str]) -> None:
+    """Malformed input and irrep regressions for the physical gate."""
+    def check(ok: bool, label: str) -> None:
+        _record_gate_check(failures, ok, label)
+
+    cache, normal, stiffness = _synthetic_gate_payload()
+    si_bad = cache['sector_keys'].index(tuple(qm._SCF_GATE_SECTOR))
+    report = qm.evaluate_scf_preflight_gate(cache, normal, stiffness)
+    check(bool(report.get('passed')), 'production-shaped synthetic payload passes every criterion')
+    check(set(report.get('criteria', {})) == set(qm._SCF_GATE_CRITERIA), 'report contains the exact required criterion set')
+
+    # Semantic convergence wins when present; the raw flag is a fallback.
+    c_bad, n_bad, s_bad = _synthetic_gate_payload()
+    n_bad['converged'] = False
+    r_bad = qm.evaluate_scf_preflight_gate(c_bad, n_bad, s_bad)
+    check(not r_bad['passed'] and 'normal_converged' in r_bad['failed_criteria'], 'semantic nonconvergence rejects the gate')
+    c_bad, n_bad, s_bad = _synthetic_gate_payload()
+    n_bad.pop('converged')
+    r_bad = qm.evaluate_scf_preflight_gate(c_bad, n_bad, s_bad)
+    check(bool(r_bad['passed']), 'raw convergence is the fallback when the semantic flag is absent')
+    c_bad, n_bad, s_bad = _synthetic_gate_payload()
+    n_bad.pop('converged')
+    n_bad['scf_iteration_converged'] = False
+    r_bad = qm.evaluate_scf_preflight_gate(c_bad, n_bad, s_bad)
+    check(not r_bad['passed'] and 'normal_converged' in r_bad['failed_criteria'], 'raw nonconvergence rejects the fallback gate')
+
+    malformed = []
+    c_bad, _, _ = _synthetic_gate_payload(); c_bad['lambda_lin_max'] = '1.2'; malformed.append(('text scalar', c_bad, {'lambda_fs', 'lambda_preflight', 'c_jt_fraction'}))
+    c_bad, _, _ = _synthetic_gate_payload(); c_bad['lambda_lin_max'] = object(); malformed.append(('object scalar', c_bad, {'lambda_fs', 'lambda_preflight', 'c_jt_fraction'}))
+    c_bad, _, _ = _synthetic_gate_payload(); c_bad['lambda_lin_max'] = 10 ** 1000; malformed.append(('overflowing integer', c_bad, {'lambda_fs', 'lambda_preflight', 'c_jt_fraction'}))
+    c_bad, _, _ = _synthetic_gate_payload(); c_bad['lambda_lin_max'] = True; malformed.append(('boolean scalar', c_bad, {'lambda_fs', 'lambda_preflight', 'c_jt_fraction'}))
+    c_bad, _, _ = _synthetic_gate_payload(); c_bad['lambda_lin_max'] = 1.0 + 1.0j; malformed.append(('complex scalar', c_bad, {'lambda_fs', 'lambda_preflight', 'c_jt_fraction'}))
+    c_bad, _, _ = _synthetic_gate_payload(); c_bad['sector_keys'] = [tuple(qm._SCF_GATE_SECTOR), 17]; malformed.append(('short sector-key list', c_bad, {'leading_irrep', 'c_jt_fraction'}))
+    c_bad, _, _ = _synthetic_gate_payload(); c_bad['sector_keys'] = list(reversed(c_bad['sector_keys'])); malformed.append(('reordered sector keys', c_bad, {'leading_irrep', 'c_jt_fraction'}))
+    c_bad, _, _ = _synthetic_gate_payload(); c_bad['sector_keys'][0] = (1.5, 1, 1); malformed.append(('non-integral sector-key component', c_bad, {'leading_irrep', 'c_jt_fraction'}))
+    c_bad, _, _ = _synthetic_gate_payload(); c_bad['sector_keys'][0] = ('bad', 1, 1); malformed.append(('non-numeric sector-key component', c_bad, {'leading_irrep', 'c_jt_fraction'}))
+    c_bad, _, _ = _synthetic_gate_payload(); c_bad['sector_keys'][0] = (True, 1, 1); malformed.append(('boolean sector-key component', c_bad, {'leading_irrep', 'c_jt_fraction'}))
+    c_bad, _, _ = _synthetic_gate_payload(); c_bad['sector_keys'][0] = 'bad'; malformed.append(('non-tuple sector key', c_bad, {'leading_irrep', 'c_jt_fraction'}))
+    c_bad, _, _ = _synthetic_gate_payload(); c_bad['sector_keys'][0] = (2, 1, 1); malformed.append(('invalid sector key', c_bad, {'leading_irrep', 'c_jt_fraction'}))
+    c_bad, _, _ = _synthetic_gate_payload(); c_bad['sector_keys'][0] = (1.0, 1, 1); malformed.append(('non-integer sector key', c_bad, {'leading_irrep', 'c_jt_fraction'}))
+    c_bad, _, _ = _synthetic_gate_payload(); c_bad['sector_keys'] = [tuple(qm._SCF_GATE_SECTOR)] * len(qm._G_OPS); malformed.append(('duplicate sector keys', c_bad, {'leading_irrep', 'c_jt_fraction'}))
+    c_bad, _, _ = _synthetic_gate_payload(); c_bad['sector_C'] = c_bad['sector_C'][:, :1]; malformed.append(('wrong sector_C width', c_bad, {'c_jt_fraction'}))
+    c_bad, _, _ = _synthetic_gate_payload(); c_bad['sector_C'] = np.vstack([c_bad['sector_C'], c_bad['sector_C'][:1]]); malformed.append(('wrong sector_C row count', c_bad, {'c_jt_fraction'}))
+    c_bad, _, _ = _synthetic_gate_payload(); c_bad['sector_frac'] = c_bad['sector_frac'][:, :3]; malformed.append(('wrong sector_frac width', c_bad, {'leading_irrep'}))
+    c_bad, _, _ = _synthetic_gate_payload(); c_bad['sector_frac'] = c_bad['sector_frac'][:3]; malformed.append(('wrong sector_frac row count', c_bad, {'leading_irrep'}))
+    c_bad, _, _ = _synthetic_gate_payload(); c_bad['sector_C'][si_bad, 1] = np.inf; malformed.append(('infinite target sector_C', c_bad, {'c_jt_fraction'}))
+    c_bad, _, _ = _synthetic_gate_payload(); c_bad['sector_frac'][si_bad, qm._IRREP_NAMES.index('es')] = np.nan; malformed.append(('non-finite leading-sector fraction', c_bad, {'leading_irrep'}))
+    c_bad, _, _ = _synthetic_gate_payload(); c_bad['sector_frac'][si_bad, qm._IRREP_NAMES.index('es')] = -0.2; malformed.append(('negative leading-sector fraction', c_bad, {'leading_irrep'}))
+    c_bad, _, _ = _synthetic_gate_payload(); c_bad['sector_C'][si_bad, 1] = -0.2; malformed.append(('negative target sector_C', c_bad, {'c_jt_fraction'}))
+    c_bad, _, _ = _synthetic_gate_payload(); c_bad['sector_C'][si_bad, 1] = 0.0; malformed.append(('zero target sector_C', c_bad, {'c_jt_fraction'}))
+    c_bad, _, _ = _synthetic_gate_payload(); c_bad['sector_C'][si_bad, 1] = np.nan; malformed.append(('NaN target sector_C', c_bad, {'c_jt_fraction'}))
+    c_bad, _, _ = _synthetic_gate_payload(); c_bad['sector_frac'][si_bad, qm._IRREP_NAMES.index('es')] = 0.5; malformed.append(('unnormalized leading-sector fractions', c_bad, {'leading_irrep'}))
+    c_bad, _, _ = _synthetic_gate_payload(); c_bad['sector_C'] = c_bad['sector_C'].astype(complex); malformed.append(('complex sector_C', c_bad, {'c_jt_fraction'}))
+    c_bad, _, _ = _synthetic_gate_payload(); c_bad['sector_frac'] = c_bad['sector_frac'].astype(complex); malformed.append(('complex sector_frac', c_bad, {'leading_irrep'}))
+    c_bad, _, _ = _synthetic_gate_payload(); c_bad['sector_frac'] = c_bad['sector_frac'].astype(object); malformed.append(('object sector_frac', c_bad, {'leading_irrep'}))
+    c_bad, _, _ = _synthetic_gate_payload(); c_bad['sector_frac'] = c_bad['sector_frac'].astype(bool); malformed.append(('boolean sector_frac', c_bad, {'leading_irrep'}))
+    c_bad, _, _ = _synthetic_gate_payload(); c_bad['sector_C'] = c_bad['sector_C'].astype(object); malformed.append(('object sector_C', c_bad, {'c_jt_fraction'}))
+    c_bad, _, _ = _synthetic_gate_payload(); c_bad['sector_C'] = c_bad['sector_C'].astype(bool); malformed.append(('boolean sector_C', c_bad, {'c_jt_fraction'}))
+    for label, bad_cache, expected_failed in malformed:
+        try:
+            r_bad = qm.evaluate_scf_preflight_gate(bad_cache, normal, stiffness)
+            rejected = (not r_bad['passed']
+                        and set(r_bad['failed_criteria']) == expected_failed)
+        except Exception as exc:
+            rejected = False
+            _log(f"    evaluator raised {type(exc).__name__}: {exc}")
+        check(rejected, f'malformed {label} rejects exactly {sorted(expected_failed)} without raising')
+    _, n_bad, _ = _synthetic_gate_payload(); n_bad['past_qcp'] = 'false'
+    r_bad = qm.evaluate_scf_preflight_gate(cache, n_bad, stiffness)
+    check(not r_bad['passed'] and 'not_past_qcp' in r_bad['failed_criteria'], 'text boolean is rejected')
+    _, _, s_bad = _synthetic_gate_payload(); s_bad['K_full_relaxed'] = np.nan
+    r_bad = qm.evaluate_scf_preflight_gate(cache, normal, s_bad)
+    check(not r_bad['passed'] and 'K_N_positive' in r_bad['failed_criteria'], 'non-finite stiffness is rejected')
+
+    # Irrep mutations use the model's actual required-sector member channels.
+    c_bad, _, _ = _synthetic_gate_payload()
+    si_bad = c_bad['sector_keys'].index(tuple(qm._SCF_GATE_SECTOR))
+    c_bad['sector_frac'][si_bad] = 0.0
+    c_bad['sector_frac'][si_bad, qm._IRREP_NAMES.index('es')] = 0.8
+    c_bad['sector_frac'][si_bad, qm._IRREP_NAMES.index('d')] = 0.2
+    r_bad = qm.evaluate_scf_preflight_gate(c_bad, normal, stiffness)
+    check(not r_bad['passed'] and 'leading_irrep' in r_bad['failed_criteria'], 'incorrect leading irrep is rejected')
+    c_bad, _, _ = _synthetic_gate_payload()
+    c_bad['sector_frac'][si_bad] = 0.0
+    c_bad['sector_frac'][si_bad, qm._IRREP_NAMES.index('es')] = 0.5
+    c_bad['sector_frac'][si_bad, qm._IRREP_NAMES.index('d')] = 0.5
+    r_bad = qm.evaluate_scf_preflight_gate(c_bad, normal, stiffness)
+    check(not r_bad['passed'] and 'leading_irrep' in r_bad['failed_criteria'], 'tied leading irrep is rejected')
+
+
+def test_scf_preflight_gate_synthetic_regressions() -> None:
+    """Synthetic, SCF-free regressions for the fail-closed physical gate."""
+    failures: list[str] = []
+
+    def check(ok: bool, label: str) -> None:
+        _record_gate_check(failures, bool(ok), label)
+
+    _check_gate_synthetic_inputs(failures)
+    cache, normal, stiffness = _synthetic_gate_payload()
+    report = qm.evaluate_scf_preflight_gate(cache, normal, stiffness)
+
+    # The launch boundary must reject before an executor is instantiated.
+    executor_calls = []
+    def recording_executor(*args, **kwargs):
+        executor_calls.append(True)
+        return qm.ThreadPoolExecutor(*args, **kwargs)
+
+    def launch_must_raise(bad_report):
+        before = len(executor_calls)
+        try:
+            qm.launch_scf_workers_after_gate(bad_report, {'must_not_run': lambda: None}, executor_factory=recording_executor)
+        except RuntimeError:
+            return len(executor_calls) == before
+        return False
+
+    c_bad, _, _ = _synthetic_gate_payload()
+    si_bad = c_bad['sector_keys'].index(tuple(qm._SCF_GATE_SECTOR))
+    c_bad['sector_C'][si_bad, 1] = 0.0
+    rejected_report = qm.evaluate_scf_preflight_gate(c_bad, normal, stiffness)
+    check(launch_must_raise(rejected_report), 'rejected gate creates no executor')
+    check(launch_must_raise({'passed': True}), 'malformed passing report creates no executor')
+
+    def mutated_report(mutator):
+        bad_report = copy.deepcopy(report)
+        mutator(bad_report)
+        return bad_report
+
+    def remove_measurement(bad_report):
+        bad_report['measurements'].pop('C_JT')
+    def add_measurement(bad_report):
+        bad_report['measurements']['unexpected'] = 1.0
+    def remove_criterion(bad_report):
+        bad_report['criteria'].pop(qm._SCF_GATE_CRITERIA[0])
+    def add_criterion(bad_report):
+        bad_report['criteria']['unexpected'] = copy.deepcopy(bad_report['criteria'][qm._SCF_GATE_CRITERIA[0]])
+    def remove_record_field(bad_report):
+        bad_report['criteria'][qm._SCF_GATE_CRITERIA[0]].pop('reason')
+    def add_record_field(bad_report):
+        bad_report['criteria'][qm._SCF_GATE_CRITERIA[0]]['unexpected'] = 1.0
+    def set_nonboolean_record_passed(bad_report):
+        bad_report['criteria'][qm._SCF_GATE_CRITERIA[0]]['passed'] = 1
+    def set_inconsistent_record_status(bad_report):
+        bad_report['criteria'][qm._SCF_GATE_CRITERIA[0]]['status'] = 'FAIL'
+    def set_inconsistent_failed_criteria(bad_report):
+        bad_report['failed_criteria'] = [qm._SCF_GATE_CRITERIA[0]]
+    def set_inconsistent_report_passed(bad_report):
+        bad_report['passed'] = False
+    def set_nonboolean_report_passed(bad_report):
+        bad_report['passed'] = 1
+    def set_wrong_schema_version(bad_report):
+        bad_report['schema_version'] = 2
+
+    invalid_report_cases = (
+        ('wrong schema version', set_wrong_schema_version),
+        ('missing measurement', remove_measurement),
+        ('extra measurement', add_measurement),
+        ('missing criterion', remove_criterion),
+        ('extra criterion', add_criterion),
+        ('missing criterion-record field', remove_record_field),
+        ('extra criterion-record field', add_record_field),
+        ('non-boolean criterion passed flag', set_nonboolean_record_passed),
+        ('inconsistent criterion status', set_inconsistent_record_status),
+        ('inconsistent failed_criteria list', set_inconsistent_failed_criteria),
+        ('inconsistent report passed flag', set_inconsistent_report_passed),
+        ('non-boolean report passed flag', set_nonboolean_report_passed),
+    )
+    for label, mutator in invalid_report_cases:
+        check(launch_must_raise(mutated_report(mutator)),
+              f'inconsistent worker report ({label}) creates no executor')
+
+    valid_results = qm.launch_scf_workers_after_gate(report, {'ok': lambda: 7}, executor_factory=recording_executor)
+    check(valid_results == {'ok': 7} and len(executor_calls) == 1, 'valid report reaches the executor and runs the task')
+
+    if failures:
+        raise AssertionError(f"{len(failures)} SCF-gate regression(s) failed: " + '; '.join(failures))
+
+
 _ONLY: tuple = ()
 
 def _step(title: str, fn, *args, **kwargs):
@@ -7570,7 +7942,7 @@ def test_delta_curvature_audit(solver, target_doping: float, M_bdg: np.ndarray, 
 
 
 def test_cluster_trw_consistency(solver, target_doping: float, M_bdg: np.ndarray, Q: float, mu: float, g_t: float, g_J: float, tol: float = 1e-12) -> None:
-    """The k-less cluster carries the bulk transverse Weiss field with its k-dependent form factor replaced by a thermal-FS average (_cluster_fs_projection → _cluster_trw_matrices).
+    """The k-less cluster carries the bulk transverse Weiss field with its k-dependent form factor replaced by a thermal-FS average.
     [1] solver.Phi_trw[:, i] = trw_irrep_scale[i]·_trw_form_factor(i): the form factors the cluster averages are the ones the bulk H uses.
     [2] T_Q parity of the averaged form factor: the normal-state spectrum is T_Q-symmetric, so every T_Q-odd (NN-bond) form factor averages to ZERO and only same-sublattice (NNN / 3NN) irreps reach the cluster.
     [3] structural identity with ARBITRARY real weights w_k (so it does not depend on the FS weights): Σ_k w_k [H(Quad67) − H(0)]_{A–B}(k) = the cluster's uniform matrix and Σ_k w_k [..]_{A–A}(k) = −(its staggered matrix),
@@ -7627,6 +7999,13 @@ def test_cluster_trw_consistency(solver, target_doping: float, M_bdg: np.ndarray
 def _run_all_tests(states_path: str | None = None, only: tuple = ()) -> int:
     global _ONLY
     _ONLY = tuple(s.strip().lower() for s in only if s.strip())
+
+    # This regression is deliberately first and self-contained: it needs no
+    # expensive SCF state and can therefore be run in isolation.
+    gate_title = 'SCF preflight physical gate: synthetic fail-closed regressions'
+    _step(gate_title, test_scf_preflight_gate_synthetic_regressions)
+    if _ONLY and all(selector in gate_title.lower() for selector in _ONLY):
+        return _print_summary()
 
     _kw_main, target_doping = extract_main_params(MODULE_PATH)
     params = qm.ModelParams(**_kw_main)
